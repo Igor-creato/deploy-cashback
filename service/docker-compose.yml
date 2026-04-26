@@ -419,6 +419,11 @@ services:
       - '--disable_metrics=disk,diskIO,tcp,udp,sched,process,hugetlb,referenced_memory'
       - '--event_storage_event_limit=default=0'
       - '--event_storage_age_limit=default=0'
+      # Без этого cAdvisor вешает на КАЖДУЮ метрику все docker labels
+      # (включая traefik.*, opencontainers.* — десятки полей), и /metrics
+      # выходит за дефолтный лимит VictoriaMetrics 16 MiB.
+      - '--store_container_labels=false'
+      - '--whitelisted_container_labels=com.docker.compose.project,com.docker.compose.service'
     depends_on:
       modsecurity:
         condition: service_healthy
