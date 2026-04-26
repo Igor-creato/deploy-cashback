@@ -128,19 +128,22 @@ safe_tar() {
   esac
 }
 
-WP_CONTENT="${STACK_DIR}/volumes/wordpress/wp-content"
-if [[ -d "$WP_CONTENT" ]]; then
-  echo "[INFO] $(ts): архивация wp-content..."
-  if safe_tar "wp-content" czf "${BACKUP_DIR}/wp-content.tar.gz" \
-      --exclude='wp-content/cache' \
-      --exclude='wp-content/upgrade' \
-      --exclude='wp-content/ai1wm-backups' \
-      -C "${STACK_DIR}/volumes/wordpress" wp-content/; then
-    echo "[OK] $(ts): wp-content: $(du -sh "${BACKUP_DIR}/wp-content.tar.gz" | cut -f1)"
+WP_ROOT="${STACK_DIR}/volumes/wordpress"
+if [[ -d "$WP_ROOT" ]]; then
+  echo "[INFO] $(ts): архивация всего каталога wordpress..."
+  # Архивируем ВЕСЬ /var/www/html (ядро WP + wp-content), иначе при restore
+  # официальный entrypoint образа докладывает недостающее из /usr/src/wordpress/
+  # — в т.ч. возвращает удалённые Hello Dolly / Akismet и default-темы.
+  if safe_tar "wordpress-files" czf "${BACKUP_DIR}/wordpress-files.tar.gz" \
+      --exclude='./wp-content/cache' \
+      --exclude='./wp-content/upgrade' \
+      --exclude='./wp-content/ai1wm-backups' \
+      -C "${WP_ROOT}" .; then
+    echo "[OK] $(ts): wordpress-files: $(du -sh "${BACKUP_DIR}/wordpress-files.tar.gz" | cut -f1)"
     WP_OK=1
   fi
 else
-  echo "[WARN] $(ts): не найден ${WP_CONTENT}, пропускаю wp-content"
+  echo "[WARN] $(ts): не найден ${WP_ROOT}, пропускаю wordpress-files"
 fi
 
 # ─── 3. Traefik certs ───────────────────────────────────────

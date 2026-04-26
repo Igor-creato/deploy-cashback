@@ -115,8 +115,18 @@ need_files=(db.sql.gz stack-configs.tar.gz webhook-configs.tar.gz webhook-app_da
 for f in "${need_files[@]}"; do
   [[ -f "${BACKUP_DIR}/${f}" ]] || { err "в бэкапе отсутствует: ${f}"; exit 1; }
 done
-HAS_WP_CONTENT=0
-[[ -f "${BACKUP_DIR}/wp-content.tar.gz" ]] && HAS_WP_CONTENT=1
+HAS_WP_FILES=0
+WP_ARCHIVE=""
+WP_ARCHIVE_KIND=""   # "full" — весь /var/www/html; "content-only" — только wp-content (legacy)
+if [[ -f "${BACKUP_DIR}/wordpress-files.tar.gz" ]]; then
+  HAS_WP_FILES=1
+  WP_ARCHIVE="${BACKUP_DIR}/wordpress-files.tar.gz"
+  WP_ARCHIVE_KIND="full"
+elif [[ -f "${BACKUP_DIR}/wp-content.tar.gz" ]]; then
+  HAS_WP_FILES=1
+  WP_ARCHIVE="${BACKUP_DIR}/wp-content.tar.gz"
+  WP_ARCHIVE_KIND="content-only"
+fi
 
 if (( PATHS_FROM_CALLER == 1 )); then
   # Caller (deploy-from-backup.sh) уже определил абсолютные пути и project-имена.
@@ -190,17 +200,23 @@ tar xzf "${BACKUP_DIR}/webhook-configs.tar.gz" -C "$WEBHOOK_DIR" --same-owner --
 ensure_env_var "${WEBHOOK_DIR}/.env" SMTP_ENV_FILE "${STACK_DIR}/.env"
 log "SMTP_ENV_FILE в ${WEBHOOK_DIR}/.env → ${STACK_DIR}/.env"
 
-# ─── 4. wp-content (опционально) ────────────────────────────
-if (( HAS_WP_CONTENT )); then
-  WP_PARENT="${STACK_DIR}/volumes/wordpress"
-  mkdir -p "$WP_PARENT"
-  if [[ -d "${WP_PARENT}/wp-content" ]]; then
-    BACKUP_OLD="${WP_PARENT}/wp-content.before-restore-$(date +%Y%m%d_%H%M%S)"
+# ─── 4. WordPress files (опционально) ───────────────────────
+if (( HAS_WP_FILES )); then
+  WP_ROOT="${STACK_DIR}/volumes/wordpress"
+  mkdir -p "$WP_ROOT"
+  if [[ -d "${WP_ROOT}/wp-content" ]]; then
+    BACKUP_OLD="${WP_ROOT}/wp-content.before-restore-$(date +%Y%m%d_%H%M%S)"
     warn "сохраняю существующий wp-content → ${BACKUP_OLD}"
-    mv "${WP_PARENT}/wp-content" "$BACKUP_OLD"
+    mv "${WP_ROOT}/wp-content" "$BACKUP_OLD"
   fi
-  info "распаковка wp-content.tar.gz → ${WP_PARENT}/"
-  tar xzf "${BACKUP_DIR}/wp-content.tar.gz" -C "$WP_PARENT" --same-owner --same-permissions
+
+  if [[ "$WP_ARCHIVE_KIND" == "full" ]]; then
+    info "распаковка wordpress-files.tar.gz → ${WP_ROOT}/ (полное ядро WP)"
+  else
+    warn "найден старый формат wp-content.tar.gz — ядро WP будет докопировано из образа (Hello Dolly/Akismet могут вернуться)"
+    info "распаковка wp-content.tar.gz → ${WP_ROOT}/"
+  fi
+  tar xzf "$WP_ARCHIVE" -C "$WP_ROOT" --same-owner --same-permissions
 fi
 
 # ─── 5. Пересоздание webhook volume ─────────────────────────
