@@ -226,8 +226,11 @@ printf '%s' "$SMTP_PASSWORD"       > "$INSTALL_DIR/secrets/smtp_password.txt"
 printf '%s' "$GRAFANA_PASSWORD"    > "$INSTALL_DIR/secrets/grafana_admin_password.txt"
 
 chmod 700 "$INSTALL_DIR/secrets"
-chmod 600 "$INSTALL_DIR/secrets/"*.txt
-log "Docker secrets созданы (dir 0700, files 0600)"
+# Внутри контейнеров /run/secrets/<name> наследует hostовые права;
+# www-data (uid 33), exporter и др. должны читать → mode 644.
+# Защита от внешних процессов обеспечивается chmod 700 на dir.
+chmod 644 "$INSTALL_DIR/secrets/"*.txt
+log "Docker secrets созданы (dir 0700, files 0644)"
 
 # ─── Traefik acme.json ────────────────────────────────────
 touch "$INSTALL_DIR/volumes/traefik/acme.json"
