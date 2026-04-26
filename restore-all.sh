@@ -280,6 +280,22 @@ info "стартую остальной stack"
 dc_stack up -d
 wait_healthy mariadb redis || { err "stack не вышел в healthy"; exit 1; }
 
+# ─── 9a. Синхронизировать пароль mysqld-exporter с .env ─────
+# Если volume mariadb пересоздавался (полный teardown), grants.sql
+# создаёт 'exporter'@% с placeholder-паролем 'changeme_set_by_install'.
+# setup-mariadb-users.sh поднимает реальный из .env и пересоздаёт exporter.
+if [[ -x "${STACK_DIR}/scripts/setup-mariadb-users.sh" ]]; then
+  info "синхронизация пароля mysqld-exporter с .env"
+  if bash "${STACK_DIR}/scripts/setup-mariadb-users.sh" >/dev/null 2>&1; then
+    log "пароль 'exporter'@% синхронизирован, mysqld-exporter пересоздан"
+  else
+    warn "setup-mariadb-users.sh завершился с ошибкой — exporter может выдавать Access denied"
+    warn "запусти вручную: sudo bash ${STACK_DIR}/scripts/setup-mariadb-users.sh"
+  fi
+else
+  warn "${STACK_DIR}/scripts/setup-mariadb-users.sh не найден — пароль exporter может не совпадать с .env"
+fi
+
 # ─── 9b. Синхронизировать пароль Grafana с secrets ──────────
 # Если grafana-data из бэкапа — пароль уже совпадает (там же лежит).
 # Если volume пустой (нет в бэкапе) — Grafana создаёт admin/admin,
