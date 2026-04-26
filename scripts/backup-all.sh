@@ -94,16 +94,51 @@ else
 fi
 
 # ─── 2. wp-content (bind mount) ─────────────────────────────
+# tar exit 1 = "файл изменился при чтении" — частая норма для живого WP
+# (сессии, error_log, ai1wm). Не считаем это фатальным.
+# При ошибке выводим первые строки stderr для диагностики.
+safe_tar() {
+  local label="$1"; shift
+  local ec=0
+  local err_log; err_log="$(mktemp)"
+  tar "$@" 2>"$err_log" || ec=$?
+  case "$ec" in
+    0)
+      rm -f "$err_log"
+      return 0
+      ;;
+    1)
+      echo "[WARN] $(ts): ${label}: tar exit 1 (файлы менялись во время чтения) — продолжаю"
+      if [[ -s "$err_log" ]]; then
+        echo "[WARN] $(ts): ${label}: первые строки stderr:"
+        head -5 "$err_log" | sed 's/^/    /'
+      fi
+      rm -f "$err_log"
+      return 0
+      ;;
+    *)
+      echo "[ERROR] $(ts): ${label}: tar exit ${ec}" >&2
+      if [[ -s "$err_log" ]]; then
+        echo "[ERROR] $(ts): ${label}: stderr (первые 20 строк):" >&2
+        head -20 "$err_log" | sed 's/^/    /' >&2
+      fi
+      rm -f "$err_log"
+      return "$ec"
+      ;;
+  esac
+}
+
 WP_CONTENT="${STACK_DIR}/volumes/wordpress/wp-content"
 if [[ -d "$WP_CONTENT" ]]; then
   echo "[INFO] $(ts): архивация wp-content..."
-  tar czf "${BACKUP_DIR}/wp-content.tar.gz" \
-    -C "${STACK_DIR}/volumes/wordpress" wp-content/ \
-    --exclude='wp-content/cache' \
-    --exclude='wp-content/upgrade' \
-    --exclude='wp-content/ai1wm-backups' 2>/dev/null
-  echo "[OK] $(ts): wp-content: $(du -sh "${BACKUP_DIR}/wp-content.tar.gz" | cut -f1)"
-  WP_OK=1
+  if safe_tar "wp-content" czf "${BACKUP_DIR}/wp-content.tar.gz" \
+      --exclude='wp-content/cache' \
+      --exclude='wp-content/upgrade' \
+      --exclude='wp-content/ai1wm-backups' \
+      -C "${STACK_DIR}/volumes/wordpress" wp-content/; then
+    echo "[OK] $(ts): wp-content: $(du -sh "${BACKUP_DIR}/wp-content.tar.gz" | cut -f1)"
+    WP_OK=1
+  fi
 else
   echo "[WARN] $(ts): не найден ${WP_CONTENT}, пропускаю wp-content"
 fi
@@ -132,11 +167,15 @@ for d in \
     secrets; do
   [[ -d "${STACK_DIR}/${d}" ]] && STACK_CONFIG_PATHS+=("${d}/")
 done
-tar czf "${BACKUP_DIR}/stack-configs.tar.gz" \
-  -C "${STACK_DIR}" \
-  "${STACK_CONFIG_PATHS[@]}" 2>/dev/null
-chmod 600 "${BACKUP_DIR}/stack-configs.tar.gz"
-echo "[OK] $(ts): stack-configs заархивированы ($(du -sh "${BACKUP_DIR}/stack-configs.tar.gz" | cut -f1))"
+if safe_tar "stack-configs" czf "${BACKUP_DIR}/stack-configs.tar.gz" \
+    -C "${STACK_DIR}" \
+    "${STACK_CONFIG_PATHS[@]}"; then
+  chmod 600 "${BACKUP_DIR}/stack-configs.tar.gz"
+  echo "[OK] $(ts): stack-configs заархивированы ($(du -sh "${BACKUP_DIR}/stack-configs.tar.gz" | cut -f1))"
+else
+  echo "[ERROR] $(ts): stack-configs архивация провалилась" >&2
+  exit 1
+fi
 
 # ─── 5. webhook-receiver app_data (named volume) ────────────
 if [[ -d "$WEBHOOK_DIR" ]]; then
@@ -160,9 +199,10 @@ if [[ -d "$WEBHOOK_DIR" ]]; then
   if [[ -f "${WEBHOOK_DIR}/docker-compose.yml" ]]; then
     WEBHOOK_FILES=(docker-compose.yml)
     [[ -f "${WEBHOOK_DIR}/.env" ]] && WEBHOOK_FILES+=(.env)
-    tar czf "${BACKUP_DIR}/webhook-configs.tar.gz" \
-      -C "${WEBHOOK_DIR}" "${WEBHOOK_FILES[@]}" 2>/dev/null
-    echo "[OK] $(ts): webhook-configs заархивированы"
+    if safe_tar "webhook-configs" czf "${BACKUP_DIR}/webhook-configs.tar.gz" \
+        -C "${WEBHOOK_DIR}" "${WEBHOOK_FILES[@]}"; then
+      echo "[OK] $(ts): webhook-configs заархивированы"
+    fi
   fi
 else
   echo "[WARN] $(ts): не найден ${WEBHOOK_DIR}, пропускаю webhook-блок"

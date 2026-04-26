@@ -31,6 +31,7 @@ LEGACY_PATTERNS=(
   'cashback-as.lock'
   'cashback-wpcron.lock'
   'scripts/backup.sh'
+  'scripts/backup-all.sh'
 )
 
 LOG_DIR="/var/log/wp-cron"
@@ -155,40 +156,64 @@ else
   CRON_BACKUP="0 */6 * * * bash ${INSTALL_DIR}/scripts/backup.sh >> /var/log/backup.log 2>&1"
 fi
 
-# ─── Снимаем старые маркированные блоки + legacy-строки ──
-TMP_CRON="$(mktemp)"
-trap 'rm -f "$TMP_CRON"' EXIT
+# ─── Helper: пересобрать crontab указанного пользователя ──
+# Удаляет старый маркированный блок + legacy-строки и добавляет новые
+# task-строки (через переменное число аргументов) под общим маркером.
+# Использование: rebuild_crontab <user> <task1> [task2] ...
+rebuild_crontab() {
+  local user="$1"; shift
+  local tmp; tmp="$(mktemp)"
 
-# Экспортируем существующий crontab (без ошибки, если его нет)
-crontab -u "$REAL_USER" -l 2>/dev/null > "$TMP_CRON" || true
+  crontab -u "$user" -l 2>/dev/null > "$tmp" || true
 
-# 1. Удалить весь блок от маркера до следующей пустой строки / EOF
-if grep -qF "$MARKER" "$TMP_CRON"; then
-  awk -v marker="$MARKER" '
-    BEGIN { skip=0 }
-    index($0, marker) { skip=1; next }
-    skip && /^$/ { skip=0; next }
-    !skip { print }
-  ' "$TMP_CRON" > "${TMP_CRON}.new" && mv "${TMP_CRON}.new" "$TMP_CRON"
-fi
+  # 1. Удалить весь блок от маркера до пустой строки / EOF
+  if grep -qF "$MARKER" "$tmp"; then
+    awk -v marker="$MARKER" '
+      BEGIN { skip=0 }
+      index($0, marker) { skip=1; next }
+      skip && /^$/ { skip=0; next }
+      !skip { print }
+    ' "$tmp" > "${tmp}.new" && mv "${tmp}.new" "$tmp"
+  fi
 
-# 2. Удалить отдельные legacy-строки (если остались вне блока)
-for pattern in "${LEGACY_PATTERNS[@]}"; do
-  grep -vF -- "$pattern" "$TMP_CRON" > "${TMP_CRON}.new" || true
-  mv "${TMP_CRON}.new" "$TMP_CRON"
-done
+  # 2. Удалить legacy-строки вне блока
+  local pattern
+  for pattern in "${LEGACY_PATTERNS[@]}"; do
+    grep -vF -- "$pattern" "$tmp" > "${tmp}.new" || true
+    mv "${tmp}.new" "$tmp"
+  done
 
-# 3. Добавить новый маркированный блок в конец (с гарантированным разделителем)
-printf '\n%s\n%s\n%s\n%s\n\n' "$MARKER" "$CRON_AS" "$CRON_WP" "$CRON_BACKUP" >> "$TMP_CRON"
+  # 3. Добавить новый блок (только если task'и переданы)
+  if (( $# > 0 )); then
+    {
+      printf '\n%s\n' "$MARKER"
+      printf '%s\n' "$@"
+      printf '\n'
+    } >> "$tmp"
+  fi
 
-# ─── Записать crontab ────────────────────────────────────
-crontab -u "$REAL_USER" "$TMP_CRON"
-log "Crontab обновлён (3 задачи + маркер)"
+  crontab -u "$user" "$tmp"
+  rm -f "$tmp"
+}
+
+# ─── Установка crontab ────────────────────────────────────
+# AS + WP-cron достаточно прав REAL_USER (только docker exec).
+# backup-all.sh читает wp-content (owned by www-data uid 33) и
+# secrets/ (mode 600 root) → должен идти из root crontab, иначе
+# tar упадёт на permission denied и бэкап будет неполным.
+rebuild_crontab "$REAL_USER" "$CRON_AS" "$CRON_WP"
+log "Crontab ${REAL_USER}: AS + wp-cron"
+
+rebuild_crontab "root" "$CRON_BACKUP"
+log "Crontab root: backup-all.sh каждые 6 часов"
 
 # ─── Показать итог ───────────────────────────────────────
 echo ""
 info "Текущий crontab ${REAL_USER}:"
 crontab -u "$REAL_USER" -l | sed 's/^/    /'
+echo ""
+info "Текущий crontab root:"
+crontab -u root -l | sed 's/^/    /'
 
 echo ""
 log "Готово."
