@@ -33,6 +33,7 @@ WEBHOOK_DIR="${WEBHOOK_DIR:-${ROOT_DIR}/postback}"
 STACK_PROJECT="${STACK_PROJECT:-$(basename "$STACK_DIR")}"
 WEBHOOK_PROJECT="${WEBHOOK_PROJECT:-$(basename "$WEBHOOK_DIR")}"
 WEBHOOK_VOL="${WEBHOOK_VOL:-${WEBHOOK_PROJECT}_app_data}"
+GRAFANA_VOL="${GRAFANA_VOL:-${STACK_PROJECT}_grafana_data}"
 BACKUP_ROOT="${BACKUP_ROOT:-/opt/backups}"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 BACKUP_DIR="${BACKUP_ROOT}/${TIMESTAMP}"
@@ -75,6 +76,7 @@ echo "[INFO] $(ts): начало backup → ${BACKUP_DIR}"
 DB_OK=0
 WP_OK=0
 WEBHOOK_DATA_OK=0
+GRAFANA_OK=0
 
 # ─── 1. MariaDB dump ────────────────────────────────────────
 echo "[INFO] $(ts): дамп MariaDB..."
@@ -163,6 +165,7 @@ for d in \
     volumes/mariadb/conf.d \
     volumes/mariadb/initdb.d \
     volumes/grafana/provisioning \
+    volumes/grafana/dashboards \
     volumes/vector \
     volumes/modsecurity/local-rules \
     volumes/crowdsec \
@@ -211,6 +214,25 @@ else
   echo "[WARN] $(ts): не найден ${WEBHOOK_DIR}, пропускаю webhook-блок"
 fi
 
+# ─── 7. Grafana data (named volume) ─────────────────────────
+# Дашборды, история алертов, аннотации, пользователи. Provisioning-yaml
+# уже в stack-configs, но runtime-состояние Grafana только в этом volume.
+if docker volume inspect "$GRAFANA_VOL" >/dev/null 2>&1; then
+  echo "[INFO] $(ts): архивация ${GRAFANA_VOL}..."
+  if docker run --rm \
+    -v "${GRAFANA_VOL}:/data:ro" \
+    -v "${BACKUP_DIR}:/backup" \
+    alpine:3.20 \
+    sh -c "tar czf /backup/grafana-data.tar.gz -C /data ." 2>/dev/null; then
+    echo "[OK] $(ts): grafana-data: $(du -sh "${BACKUP_DIR}/grafana-data.tar.gz" | cut -f1)"
+    GRAFANA_OK=1
+  else
+    echo "[ERROR] $(ts): архивация grafana-data failed" >&2
+  fi
+else
+  echo "[WARN] $(ts): volume ${GRAFANA_VOL} не найден, пропускаю grafana-data"
+fi
+
 # ─── 7. Ротация ─────────────────────────────────────────────
 DELETED=$(find "${BACKUP_ROOT}" -maxdepth 1 -mindepth 1 -type d -mtime +${RETENTION_DAYS} -exec rm -rf {} \; -print | wc -l)
 if [[ "$DELETED" -gt 0 ]]; then
@@ -236,6 +258,7 @@ cashback_backup_size_bytes $(du -sb "${BACKUP_DIR}" | cut -f1)
 cashback_backup_component_ok{component="db"} ${DB_OK}
 cashback_backup_component_ok{component="wp_content"} ${WP_OK}
 cashback_backup_component_ok{component="webhook_data"} ${WEBHOOK_DATA_OK}
+cashback_backup_component_ok{component="grafana_data"} ${GRAFANA_OK}
 EOF
   mv "${TMP}" "${TEXTFILE_DIR}/cashback_backup.prom"
   chmod 644 "${TEXTFILE_DIR}/cashback_backup.prom"

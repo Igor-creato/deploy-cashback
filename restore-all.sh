@@ -128,11 +128,15 @@ elif [[ -f "${BACKUP_DIR}/wp-content.tar.gz" ]]; then
   WP_ARCHIVE_KIND="content-only"
 fi
 
+HAS_GRAFANA_DATA=0
+[[ -f "${BACKUP_DIR}/grafana-data.tar.gz" ]] && HAS_GRAFANA_DATA=1
+
 if (( PATHS_FROM_CALLER == 1 )); then
   # Caller (deploy-from-backup.sh) уже определил абсолютные пути и project-имена.
   STACK_PROJECT="${STACK_PROJECT:-$(basename "$STACK_DIR")}"
   WEBHOOK_PROJECT="${WEBHOOK_PROJECT:-$(basename "$WEBHOOK_DIR")}"
   WEBHOOK_VOL="${WEBHOOK_VOL:-${WEBHOOK_PROJECT}_app_data}"
+  GRAFANA_VOL="${GRAFANA_VOL:-${STACK_PROJECT}_grafana_data}"
 else
   # ─── Интерактивный выбор папок ──────────────────────────────
   echo
@@ -158,6 +162,7 @@ else
   STACK_PROJECT="${DEFAULT_STACK_PROJECT:-$(basename "$STACK_DIR")}"
   WEBHOOK_PROJECT="${DEFAULT_WEBHOOK_PROJECT:-$(basename "$WEBHOOK_DIR")}"
   WEBHOOK_VOL="${DEFAULT_WEBHOOK_VOL:-${WEBHOOK_PROJECT}_app_data}"
+  GRAFANA_VOL="${GRAFANA_VOL:-${STACK_PROJECT}_grafana_data}"
 fi
 
 dc_stack()   { docker compose --project-directory "$STACK_DIR"   -f "${STACK_DIR}/docker-compose.yml"   -p "$STACK_PROJECT"   "$@"; }
@@ -168,6 +173,7 @@ info "восстановление из:   ${BACKUP_DIR}"
 info "STACK_DIR:           ${STACK_DIR}    (project: ${STACK_PROJECT})"
 info "WEBHOOK_DIR:         ${WEBHOOK_DIR}  (project: ${WEBHOOK_PROJECT})"
 info "WEBHOOK_VOL:         ${WEBHOOK_VOL}"
+info "GRAFANA_VOL:         ${GRAFANA_VOL}$( ((HAS_GRAFANA_DATA)) || echo '  (бэкапа нет — пропуск)')"
 echo
 warn "ОПЕРАЦИЯ ПЕРЕЗАПИШЕТ:"
 warn "  - содержимое ${STACK_DIR}/ и ${WEBHOOK_DIR}/ (configs, secrets, wp-content)"
@@ -230,6 +236,22 @@ docker run --rm \
   sh -c "tar xzf /b/webhook-app_data.tar.gz -C /data" >/dev/null
 log "${WEBHOOK_VOL} восстановлен"
 
+# ─── 5b. Пересоздание grafana volume (если есть в бэкапе) ───
+# Делаем до dc_stack up, чтобы grafana стартовала уже с данными.
+if (( HAS_GRAFANA_DATA )); then
+  info "пересоздание volume ${GRAFANA_VOL}"
+  docker volume rm "$GRAFANA_VOL" 2>/dev/null || true
+  docker volume create "$GRAFANA_VOL" >/dev/null
+  docker run --rm \
+    -v "${GRAFANA_VOL}:/data" \
+    -v "${BACKUP_DIR}:/b:ro" \
+    alpine:3.20 \
+    sh -c "tar xzf /b/grafana-data.tar.gz -C /data" >/dev/null
+  log "${GRAFANA_VOL} восстановлен"
+else
+  warn "grafana-data.tar.gz нет в бэкапе — Grafana стартует с пустым volume; пароль admin будет применён из secrets/"
+fi
+
 # ─── 6. Сети ────────────────────────────────────────────────
 for net in proxy db-shared; do
   docker network inspect "$net" >/dev/null 2>&1 || { docker network create "$net" >/dev/null; log "сеть $net создана"; }
@@ -257,6 +279,26 @@ log "БД восстановлена"
 info "стартую остальной stack"
 dc_stack up -d
 wait_healthy mariadb redis || { err "stack не вышел в healthy"; exit 1; }
+
+# ─── 9b. Синхронизировать пароль Grafana с secrets ──────────
+# Если grafana-data из бэкапа — пароль уже совпадает (там же лежит).
+# Если volume пустой (нет в бэкапе) — Grafana создаёт admin/admin,
+# а secrets/grafana_admin_password.txt содержит другое значение.
+# В обоих случаях reset-admin-password идемпотентен и безопасен.
+if [[ -f "${STACK_DIR}/secrets/grafana_admin_password.txt" ]]; then
+  info "синхронизация пароля Grafana admin с secrets/"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if docker exec grafana sh -c \
+        'grafana-cli admin reset-admin-password "$(cat /run/secrets/grafana_admin_password)"' \
+        >/dev/null 2>&1; then
+      log "пароль Grafana admin установлен из secrets/grafana_admin_password.txt"
+      break
+    fi
+    sleep 2
+  done
+else
+  warn "secrets/grafana_admin_password.txt не найден — пропускаю синхронизацию пароля Grafana"
+fi
 
 # ─── 10. Поднимаем webhook ──────────────────────────────────
 info "стартую webhook-receiver"

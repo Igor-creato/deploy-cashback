@@ -125,6 +125,8 @@ warn "  - configs/secrets/wp-content в ${STACK_DIR}/"
 warn "  - configs/.env в ${WEBHOOK_DIR}/"
 warn "  - БД в MariaDB"
 warn "  - docker volume ${WEBHOOK_VOL} (будет удалён и пересоздан)"
+[[ -f "${BACKUP_DIR}/grafana-data.tar.gz" ]] && \
+  warn "  - docker volume ${STACK_PROJECT}_grafana_data (будет удалён и пересоздан из бэкапа)"
 echo
 read -rp "введите 'DEPLOY' для подтверждения: " ans
 [[ "$ans" == "DEPLOY" ]] || { info "отмена"; exit 0; }
