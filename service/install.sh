@@ -29,6 +29,19 @@ fi
 REAL_USER="${SUDO_USER:-root}"
 REAL_GROUP="$(id -gn "$REAL_USER" 2>/dev/null || echo "root")"
 
+# ─── cashback.env (источник BACKUP_ROOT) ──────────────────
+# Лежит на уровень выше service/, если стек развёрнут из umbrella-репо.
+# Если файла нет — берём fallback. Если запущено через install-all.sh,
+# переменная уже экспортирована, source просто перепишет тем же.
+PARENT_DIR="$(cd "${INSTALL_DIR}/.." && pwd)"
+if [[ -f "${PARENT_DIR}/cashback.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${PARENT_DIR}/cashback.env"
+  set +a
+fi
+BACKUP_ROOT="${BACKUP_ROOT:-/home/${REAL_USER}/backup}"
+
 echo ""
 echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
 echo -e "${CYAN}   Cashback Stack — Production Installer${NC}"
@@ -141,7 +154,7 @@ dirs=(
   "$INSTALL_DIR/scripts"
   "$INSTALL_DIR/volumes/modsecurity/local-rules"
   "$INSTALL_DIR/volumes/vector"
-  "/opt/backups"
+  "$BACKUP_ROOT"
   "/var/lib/node_exporter/textfile_collector"
 )
 
@@ -149,7 +162,21 @@ for d in "${dirs[@]}"; do
   mkdir -p "$d"
 done
 
-log "Директории созданы"
+# ─── Права для backup-каталога и textfile collector ──────
+# Cron-задача backup-all.sh запускается под REAL_USER — ему нужен write-доступ.
+# Дублирует логику setup-cron.sh для случая, когда install.sh выполняется
+# отдельно (без последующего setup-cron.sh).
+if [[ "$REAL_USER" != "root" ]]; then
+  chown "${REAL_USER}:${REAL_GROUP}" "$BACKUP_ROOT"
+  chmod 750 "$BACKUP_ROOT"
+
+  # textfile collector: setgid (2775) + group=REAL_GROUP, чтобы скрипт
+  # бэкапа писал .prom-файл, а node-exporter (root) читал.
+  chown "root:${REAL_GROUP}" /var/lib/node_exporter/textfile_collector
+  chmod 2775 /var/lib/node_exporter/textfile_collector
+fi
+
+log "Директории созданы (backup: ${BACKUP_ROOT})"
 
 # ─── Создание .env ────────────────────────────────────────
 cat > "$INSTALL_DIR/.env" <<EOF
