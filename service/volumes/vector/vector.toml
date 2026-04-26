@@ -1,0 +1,188 @@
+# ═══════════════════════════════════════════════════════════
+#  Vector — собирает логи и пушит в VictoriaLogs
+#  через ES /_bulk API.
+#
+#  Источники:
+#   - /var/log/nginx/access.log    (формат main, см. nginx.conf)
+#   - /var/log/nginx/error.log
+#   - /var/log/modsec/modsec_audit.log    (JSON, RelevantOnly)
+#   - /var/log/traefik/access.log         (JSON)
+#
+#  PHP-FPM stdout НЕ забираем напрямую: docker_logs source требует
+#  /var/run/docker.sock, а у нас доступ к Docker API через
+#  socket-proxy. PHP Fatal эскалируется в HTTP 502 и ловится через
+#  nginx_error_parsed + алерт nginx-502-504 + php-fpm-saturation.
+# ═══════════════════════════════════════════════════════════
+
+[api]
+enabled = false
+
+# ── SOURCES ─────────────────────────────────────────────────
+
+[sources.nginx_access]
+type = "file"
+include = ["/var/log/nginx/access.log"]
+read_from = "end"
+ignore_older_secs = 86400
+
+[sources.nginx_error]
+type = "file"
+include = ["/var/log/nginx/error.log"]
+read_from = "end"
+ignore_older_secs = 86400
+
+[sources.modsec_audit]
+type = "file"
+include = ["/var/log/modsec/modsec_audit.log"]
+read_from = "end"
+ignore_older_secs = 86400
+
+[sources.traefik_access]
+type = "file"
+include = ["/var/log/traefik/*.log"]
+read_from = "end"
+ignore_older_secs = 86400
+
+# ── TRANSFORMS (VRL = Vector Remap Language) ────────────────
+
+# nginx access — парсим log_format main
+# 1.2.3.4 - - [24/Apr/2026:10:15:22 +0000] "GET /path HTTP/1.1" 200 1234 "ref" "ua" rt=0.045 uct=0.001 uht=0.044 urt=0.044 cache=HIT
+#
+# Маскируем чувствительные query-параметры (token/api_key/secret/auth/password/sig)
+# в .path и .referer перед записью в VictoriaLogs (retention 14d).
+[transforms.nginx_access_parsed]
+type = "remap"
+inputs = ["nginx_access"]
+source = '''
+parsed, err = parse_regex(.message, r'^(?P<remote_addr>\S+) \S+ \S+ \[(?P<time_local>[^\]]+)\] "(?P<method>\S+) (?P<path>\S+) (?P<proto>[^"]+)" (?P<status>\d+) (?P<bytes>\d+) "(?P<referer>[^"]*)" "(?P<user_agent>[^"]*)" rt=(?P<request_time>\S+) uct=(?P<upstream_connect_time>\S+) uht=(?P<upstream_header_time>\S+) urt=(?P<upstream_response_time>\S+) cache=(?P<cache_status>\S+)$')
+if err == null {
+  .remote_addr = parsed.remote_addr
+  .method = parsed.method
+  .path = parsed.path
+  .status = to_int!(parsed.status)
+  .bytes = to_int!(parsed.bytes)
+  .referer = parsed.referer
+  .user_agent = parsed.user_agent
+  .request_time = to_float(parsed.request_time) ?? 0.0
+  .upstream_response_time = to_float(parsed.upstream_response_time) ?? 0.0
+  .cache_status = parsed.cache_status
+}
+secret_re = r'([?&](?:token|api[_-]?key|key|secret|auth|pwd|password|access[_-]?token|refresh[_-]?token|sig|signature|session|sid)=)[^&\s"]+'
+if exists(.path) {
+  .path = replace(to_string(.path) ?? "", secret_re, "$$1***REDACTED***")
+}
+if exists(.referer) {
+  .referer = replace(to_string(.referer) ?? "", secret_re, "$$1***REDACTED***")
+}
+if exists(.message) {
+  .message = replace(to_string(.message) ?? "", secret_re, "$$1***REDACTED***")
+}
+.source_type = "nginx_access"
+.service = "nginx"
+'''
+
+# nginx error — извлекаем уровень
+[transforms.nginx_error_parsed]
+type = "remap"
+inputs = ["nginx_error"]
+source = '''
+parsed, err = parse_regex(.message, r'^(?P<ts>\S+ \S+) \[(?P<level>\w+)\]')
+if err == null {
+  .level = parsed.level
+}
+.source_type = "nginx_error"
+.service = "nginx"
+'''
+
+# modsec audit — уже JSON, парсим в поля верхнего уровня.
+#
+# Маскируем потенциальные пароли/токены в request body, заголовках Authorization/Cookie
+# и в URI. Тело /wp-login.php дополнительно отрезано на стороне ModSecurity
+# (см. wordpress-exclusions.conf id:1010), но scrub оставляем как defense-in-depth
+# для остальных endpoint'ов (REST API, webhook'и партнёрских сетей).
+[transforms.modsec_parsed]
+type = "remap"
+inputs = ["modsec_audit"]
+source = '''
+parsed, err = parse_json(.message)
+if err == null {
+  . = merge(., parsed) ?? .
+}
+secret_re = r'(?i)("?(?:pwd|password|pass|api[_-]?key|secret|access[_-]?token|refresh[_-]?token|auth|token|sig|signature|session)"?\s*[:=]\s*"?)[^",&\s}]+'
+uri_re = r'([?&](?:token|api[_-]?key|key|secret|auth|pwd|password|access[_-]?token|refresh[_-]?token|sig|signature|session|sid)=)[^&\s"]+'
+if exists(.transaction.request.body) {
+  .transaction.request.body = replace(to_string(.transaction.request.body) ?? "", secret_re, "$$1***REDACTED***")
+}
+if exists(.transaction.request.uri) {
+  .transaction.request.uri = replace(to_string(.transaction.request.uri) ?? "", uri_re, "$$1***REDACTED***")
+}
+if exists(.transaction.request.headers."Authorization") {
+  .transaction.request.headers."Authorization" = "***REDACTED***"
+}
+if exists(.transaction.request.headers."authorization") {
+  .transaction.request.headers."authorization" = "***REDACTED***"
+}
+if exists(.transaction.request.headers."Cookie") {
+  .transaction.request.headers."Cookie" = "***REDACTED***"
+}
+if exists(.transaction.request.headers."cookie") {
+  .transaction.request.headers."cookie" = "***REDACTED***"
+}
+# страховка для произвольного JSON-формата: scrub самой исходной строки
+if exists(.message) {
+  .message = replace(to_string(.message) ?? "", secret_re, "$$1***REDACTED***")
+}
+.source_type = "modsec_audit"
+.service = "modsecurity"
+'''
+
+# traefik access — уже JSON.
+# RequestPath / RequestAddr / Referer чистим от секретов в query string.
+[transforms.traefik_parsed]
+type = "remap"
+inputs = ["traefik_access"]
+source = '''
+parsed, err = parse_json(.message)
+if err == null {
+  . = merge(., parsed) ?? .
+}
+uri_re = r'([?&](?:token|api[_-]?key|key|secret|auth|pwd|password|access[_-]?token|refresh[_-]?token|sig|signature|session|sid)=)[^&\s"]+'
+if exists(.RequestPath) {
+  .RequestPath = replace(to_string(.RequestPath) ?? "", uri_re, "$$1***REDACTED***")
+}
+if exists(.RequestAddr) {
+  .RequestAddr = replace(to_string(.RequestAddr) ?? "", uri_re, "$$1***REDACTED***")
+}
+if exists(."request_Referer") {
+  ."request_Referer" = replace(to_string(."request_Referer") ?? "", uri_re, "$$1***REDACTED***")
+}
+if exists(.message) {
+  .message = replace(to_string(.message) ?? "", uri_re, "$$1***REDACTED***")
+}
+.source_type = "traefik_access"
+.service = "traefik"
+'''
+
+# ── SINK: VictoriaLogs (ES bulk API) ────────────────────────
+
+[sinks.victorialogs]
+type = "elasticsearch"
+inputs = [
+  "nginx_access_parsed",
+  "nginx_error_parsed",
+  "modsec_parsed",
+  "traefik_parsed",
+]
+endpoints = ["http://victorialogs:9428/insert/elasticsearch/"]
+mode = "bulk"
+api_version = "v8"
+compression = "gzip"
+healthcheck.enabled = false
+
+[sinks.victorialogs.query]
+"_msg_field" = "message"
+"_time_field" = "timestamp"
+"_stream_fields" = "service,source_type"
+
+[sinks.victorialogs.bulk]
+index = "vector-{{ service }}"

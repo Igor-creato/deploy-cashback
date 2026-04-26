@@ -1,0 +1,452 @@
+apiVersion: 1
+
+groups:
+  # ═══════════════════════════════════════════════════════════
+  # HOST METRICS (node-exporter)
+  # ═══════════════════════════════════════════════════════════
+  - orgId: 1
+    name: host-alerts
+    folder: Alerts
+    interval: 1m
+    rules:
+      - uid: ram-low-warn
+        title: 'RAM available <10%'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: victoriametrics-uid
+            model:
+              expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes
+              instant: true
+          - refId: C
+            datasourceUid: '__expr__'
+            model:
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [0.1] }
+                  reducer: { type: last }
+              type: threshold
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: 'Доступно <10% RAM хоста'
+
+      - uid: ram-low-crit
+        title: 'RAM available <5%'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: victoriametrics-uid
+            model:
+              expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes
+              instant: true
+          - refId: C
+            datasourceUid: '__expr__'
+            model:
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [0.05] }
+                  reducer: { type: last }
+              type: threshold
+        for: 3m
+        labels: { severity: critical }
+        annotations:
+          summary: 'CRITICAL: <5% RAM, OOM возможен'
+
+      - uid: cpu-high
+        title: 'CPU sustained >95%'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: victoriametrics-uid
+            model:
+              expr: 1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))
+              instant: true
+          - refId: C
+            datasourceUid: '__expr__'
+            model:
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0.95] }
+                  reducer: { type: last }
+              type: threshold
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: 'CPU >95% более 10 минут'
+
+      - uid: iowait-high
+        title: 'IO wait high'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: victoriametrics-uid
+            model:
+              expr: avg by (instance) (rate(node_cpu_seconds_total{mode="iowait"}[5m]))
+              instant: true
+          - refId: C
+            datasourceUid: '__expr__'
+            model:
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0.2] }
+                  reducer: { type: last }
+              type: threshold
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: 'IO wait >20% — диск перегружен'
+
+      - uid: disk-low-warn
+        title: 'Disk free <15%'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: victoriametrics-uid
+            model:
+              expr: node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}
+              instant: true
+          - refId: C
+            datasourceUid: '__expr__'
+            model:
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [0.15] }
+                  reducer: { type: last }
+              type: threshold
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: 'Свободно <15% места'
+
+      - uid: disk-low-crit
+        title: 'Disk free <5%'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: victoriametrics-uid
+            model:
+              expr: node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}
+              instant: true
+          - refId: C
+            datasourceUid: '__expr__'
+            model:
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [0.05] }
+                  reducer: { type: last }
+              type: threshold
+        for: 3m
+        labels: { severity: critical }
+        annotations:
+          summary: 'CRITICAL: свободно <5% места'
+
+  # ═══════════════════════════════════════════════════════════
+  # CONTAINER METRICS (cAdvisor)
+  # ═══════════════════════════════════════════════════════════
+  - orgId: 1
+    name: container-alerts
+    folder: Alerts
+    interval: 1m
+    rules:
+      - uid: container-down
+        title: 'Container not updating'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: victoriametrics-uid
+            model:
+              expr: time() - container_last_seen{name=~"nginx|wordpress|mariadb|traefik|redis|modsecurity|crowdsec|grafana|victoriametrics|cadvisor|node-exporter|victorialogs|vector|mysqld-exporter|redis-exporter|php-fpm-exporter|webhook-receiver|webhook-admin|webhook-worker"}
+              instant: true
+          - refId: C
+            datasourceUid: '__expr__'
+            model:
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [60] }
+                  reducer: { type: last }
+              type: threshold
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: 'Контейнер не обновляет метрики >60с'
+
+      # Память контейнера относительно лимита (working_set, не usage с page cache)
+      - uid: container-mem-pressure
+        title: 'Container memory >90% of limit'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: victoriametrics-uid
+            model:
+              expr: container_memory_working_set_bytes{name!=""} / container_spec_memory_limit_bytes{name!=""} > 0
+              instant: true
+          - refId: C
+            datasourceUid: '__expr__'
+            model:
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0.9] }
+                  reducer: { type: last }
+              type: threshold
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: 'Контейнер потребляет >90% выделенной памяти'
+
+      # Стабильный рост памяти (working_set, не usage) — реальная утечка
+      - uid: container-memory-leak
+        title: 'Container memory leak'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: victoriametrics-uid
+            model:
+              expr: deriv(container_memory_working_set_bytes{name!=""}[30m]) * 3600
+              instant: true
+          - refId: C
+            datasourceUid: '__expr__'
+            model:
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [524288000] } # 500MB/час
+                  reducer: { type: last }
+              type: threshold
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: 'Растёт память >500MB/час более 30 минут'
+
+  # ═══════════════════════════════════════════════════════════
+  # MariaDB / Redis / PHP-FPM (новые экспортёры)
+  # ═══════════════════════════════════════════════════════════
+  - orgId: 1
+    name: service-alerts
+    folder: Alerts
+    interval: 1m
+    rules:
+      - uid: mariadb-conn-pool
+        title: 'MariaDB connection pool >80%'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: victoriametrics-uid
+            model:
+              expr: mysql_global_status_threads_connected / mysql_global_variables_max_connections
+              instant: true
+          - refId: C
+            datasourceUid: '__expr__'
+            model:
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0.8] }
+                  reducer: { type: last }
+              type: threshold
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: 'MariaDB: используется >80% пула соединений'
+
+      - uid: mariadb-slow-queries
+        title: 'MariaDB slow queries'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: victoriametrics-uid
+            model:
+              expr: rate(mysql_global_status_slow_queries[5m])
+              instant: true
+          - refId: C
+            datasourceUid: '__expr__'
+            model:
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [1] }
+                  reducer: { type: last }
+              type: threshold
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: 'MariaDB: >1 slow query/sec — нужен индекс или N+1'
+
+      - uid: redis-mem
+        title: 'Redis memory >90%'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: victoriametrics-uid
+            model:
+              expr: redis_memory_used_bytes / redis_memory_max_bytes
+              instant: true
+          - refId: C
+            datasourceUid: '__expr__'
+            model:
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0.9] }
+                  reducer: { type: last }
+              type: threshold
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: 'Redis: >90% maxmemory, начнётся LRU вытеснение'
+
+      - uid: php-fpm-saturation
+        title: 'PHP-FPM pool saturated'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: victoriametrics-uid
+            model:
+              expr: phpfpm_processes_active / phpfpm_processes_total
+              instant: true
+          - refId: C
+            datasourceUid: '__expr__'
+            model:
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0.85] }
+                  reducer: { type: last }
+              type: threshold
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: 'PHP-FPM: >85% воркеров заняты — скоро 502'
+
+      - uid: dlq-large
+        title: 'Webhook DLQ >100 messages'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: victoriametrics-uid
+            model:
+              expr: webhook_dlq_size
+              instant: true
+          - refId: C
+            datasourceUid: '__expr__'
+            model:
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [100] }
+                  reducer: { type: last }
+              type: threshold
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: 'Webhook DLQ растёт — postbacks не обрабатываются'
+
+      - uid: webhook-stale
+        title: 'Webhook worker not processing'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 1200, to: 0 }
+            datasourceUid: victoriametrics-uid
+            model:
+              expr: time() - webhook_last_processed_ts
+              instant: true
+          - refId: C
+            datasourceUid: '__expr__'
+            model:
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [600] }
+                  reducer: { type: last }
+              type: threshold
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: 'Worker не обработал ни одного сообщения >10 минут'
+
+      - uid: backup-stale
+        title: 'Backup older than 26h'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: victoriametrics-uid
+            model:
+              expr: time() - cashback_backup_last_success_timestamp_seconds
+              instant: true
+          - refId: C
+            datasourceUid: '__expr__'
+            model:
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [93600] } # 26h
+                  reducer: { type: last }
+              type: threshold
+        for: 30m
+        labels: { severity: critical }
+        annotations:
+          summary: 'Не было успешного бэкапа MariaDB >26 часов'
+
+  # ═══════════════════════════════════════════════════════════
+  # CORE — мониторинг сам себя
+  # ═══════════════════════════════════════════════════════════
+  - orgId: 1
+    name: core-alerts
+    folder: Alerts
+    interval: 1m
+    rules:
+      - uid: vm-down
+        title: 'VictoriaMetrics down'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: victoriametrics-uid
+            model:
+              expr: up{job="victoriametrics"}
+              instant: true
+          - refId: C
+            datasourceUid: '__expr__'
+            model:
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+                  reducer: { type: last }
+              type: threshold
+        for: 2m
+        noDataState: Alerting
+        labels: { severity: critical }
+        annotations:
+          summary: 'VictoriaMetrics не отвечает — мониторинг ослеп'
+
+      - uid: cadvisor-down
+        title: 'cAdvisor down'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: victoriametrics-uid
+            model:
+              expr: up{job="cadvisor"}
+              instant: true
+          - refId: C
+            datasourceUid: '__expr__'
+            model:
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+                  reducer: { type: last }
+              type: threshold
+        for: 2m
+        noDataState: Alerting
+        labels: { severity: critical }
+        annotations:
+          summary: 'cAdvisor не отвечает — нет метрик контейнеров'

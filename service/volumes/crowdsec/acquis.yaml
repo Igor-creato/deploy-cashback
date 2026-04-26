@@ -1,0 +1,19 @@
+---
+# Traefik access log — JSON формат, см. volumes/traefik/traefik.yml
+filenames:
+  - /var/log/traefik/access.log
+labels:
+  type: traefik
+---
+# Nginx access + error
+filenames:
+  - /var/log/nginx/access.log
+  - /var/log/nginx/error.log
+labels:
+  type: nginx
+---
+# ModSecurity audit log — JSON, MODSEC_AUDIT_LOG_FORMAT=JSON
+filenames:
+  - /var/log/modsec/modsec_audit.log
+labels:
+  type: modsecurity

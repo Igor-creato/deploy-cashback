@@ -1,0 +1,594 @@
+"""
+Database helper.
+All queries use parameterized statements (%s placeholders via PyMySQL).
+"""
+import hashlib
+import logging
+import random
+import re
+import time
+from contextlib import contextmanager
+from typing import Any, Generator
+
+import pymysql
+import pymysql.cursors
+
+from app.config import get_db_config
+
+logger = logging.getLogger("webhook.db")
+
+_TABLE_PREFIX_RE = re.compile(r"^[a-zA-Z0-9_]+$")
+_COLUMN_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
+
+# Ключ в data dict → имя колонки в БД (только для несовпадений)
+_FIELD_TO_COLUMN: dict[str, str] = {
+    "partner_name": "partner",
+}
+
+# Типы полей для приведения значений
+_FIELD_TYPES: dict[str, str] = {
+    "user_id": "int",
+    "offer_id": "int",
+    "website_id": "int",
+    "sum_order": "decimal",
+    "comission": "decimal",
+}
+
+# Максимальная длина строковых полей (символы) — защита от переполнения колонок
+_FIELD_MAX_LEN: dict[str, int] = {
+    "click_id": 255,
+    "uniq_id": 255,
+    "order_number": 255,
+    "offer_name": 512,
+    "action_date": 64,
+    "click_time": 64,
+    "currency": 10,
+    "partner_name": 255,
+    "idempotency_key": 64,
+}
+
+# Дефолтные значения (если значение пустое/отсутствует)
+_FIELD_DEFAULTS: dict[str, Any] = {
+    "user_id": 0,
+    "order_status": "waiting",
+    "currency": "RUB",
+}
+
+
+def _coerce_value(value: Any, field: str) -> Any:
+    """Привести значение к нужному типу на основе имени поля."""
+    field_type = _FIELD_TYPES.get(field, "str")
+    default = _FIELD_DEFAULTS.get(field)
+
+    if field_type == "int":
+        try:
+            return int(value) if value else (default if default is not None else None)
+        except (ValueError, TypeError):
+            return default if default is not None else None
+
+    if field_type == "decimal":
+        try:
+            return float(value) if value else (default if default is not None else 0.0)
+        except (ValueError, TypeError):
+            return default if default is not None else 0.0
+
+    # str
+    result = str(value).strip() if value else ""
+    if not result and default is not None:
+        return default
+    result = result or None
+    if result is not None:
+        max_len = _FIELD_MAX_LEN.get(field)
+        if max_len and len(result) > max_len:
+            result = result[:max_len]
+    return result
+
+
+def _validate_prefix(prefix: str) -> str:
+    if not _TABLE_PREFIX_RE.match(prefix):
+        raise ValueError(f"Invalid table prefix: {prefix!r}")
+    return prefix
+
+
+def _prefix() -> str:
+    db_cfg = get_db_config()
+    return _validate_prefix(db_cfg.get("table_prefix", "wp_"))
+
+
+@contextmanager
+def get_conn() -> Generator[pymysql.connections.Connection, None, None]:
+    db_cfg = get_db_config()
+    if not db_cfg.get("host"):
+        raise RuntimeError("Database not configured")
+    conn = pymysql.connect(
+        host=db_cfg["host"],
+        port=int(db_cfg.get("port", 3306)),
+        user=db_cfg["user"],
+        password=db_cfg["password"],
+        database=db_cfg["database"],
+        charset="utf8mb4",
+        cursorclass=pymysql.cursors.DictCursor,
+        connect_timeout=5,
+        read_timeout=10,
+        write_timeout=10,
+        autocommit=False,
+        init_command="SET time_zone = '+00:00'",
+    )
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def test_connection() -> tuple[bool, str]:
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 AS ok")
+                row = cur.fetchone()
+                if row and row.get("ok") == 1:
+                    return True, "OK"
+                return False, "Unexpected result"
+    except Exception as e:
+        return False, str(e)
+
+
+def get_affiliate_networks() -> list[dict[str, Any]]:
+    """Read networks from wp_cashback_affiliate_networks table."""
+    prefix = _prefix()
+    table = f"{prefix}cashback_affiliate_networks"
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT * FROM `{table}` ORDER BY `name` ASC")
+                return cur.fetchall()
+    except Exception as e:
+        logger.warning("Failed to read affiliate_networks: %s", e)
+        return []
+
+
+# ============================================================
+# Distinct order statuses from transactions
+# ============================================================
+
+_DEFAULT_STATUSES = {"waiting", "completed", "declined"}
+
+# TTL-кэш для валидации в worker (избегаем SELECT на каждый webhook)
+_status_cache: tuple[float, set[str]] = (0.0, set())
+_STATUS_CACHE_TTL = 300  # 5 минут
+
+
+def get_distinct_order_statuses() -> list[str]:
+    """Read allowed order_status values from the ENUM column definition.
+    Falls back to _DEFAULT_STATUSES if schema query fails."""
+    prefix = _prefix()
+    db_cfg = get_db_config()
+    database = db_cfg.get("database", "")
+    table = f"{prefix}cashback_transactions"
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
+                    "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s "
+                    "AND COLUMN_NAME = 'order_status'",
+                    (database, table),
+                )
+                row = cur.fetchone()
+                if row:
+                    # COLUMN_TYPE looks like: enum('waiting','completed','declined','hold','balance')
+                    col_type = row["COLUMN_TYPE"]
+                    # Extract values between quotes
+                    statuses = re.findall(r"'([^']+)'", col_type)
+                    if statuses:
+                        return sorted(statuses)
+    except Exception:
+        logger.warning("Failed to read ENUM values for order_status, using defaults")
+    return sorted(_DEFAULT_STATUSES)
+
+
+def _get_allowed_statuses() -> set[str]:
+    """Return allowed statuses, cached for 5 minutes."""
+    global _status_cache
+    now = time.time()
+    if now - _status_cache[0] < _STATUS_CACHE_TTL and _status_cache[1]:
+        return _status_cache[1]
+    statuses = set(get_distinct_order_statuses())
+    _status_cache = (now, statuses)
+    return statuses
+
+
+# ============================================================
+# cashback_webhooks — raw payload storage
+# Columns: id, payload, payload_hash, network_slug, received_at
+# ============================================================
+
+_RETRYABLE_STATUSES = ("user_mismatch", "click_not_found", "error")
+
+
+def save_raw_webhook(
+    payload_json: str, network_slug: str, *, _max_retries: int = 3
+) -> int | None:
+    """
+    Insert into cashback_webhooks with deduplication.
+    payload_hash is computed by a BEFORE INSERT trigger (SHA2 of payload).
+    UNIQUE KEY on payload_hash handles deduplication via INSERT IGNORE.
+
+    If a duplicate exists with a failed processing_status (user_mismatch,
+    click_not_found, error), delete the old record and re-insert so the
+    webhook can be reprocessed. Successfully processed webhooks (ok, NULL)
+    are still deduplicated.
+
+    Returns row id or None if duplicate (already processed successfully).
+    Retries on deadlock (MySQL error 1213).
+    """
+    prefix = _prefix()
+    table = f"{prefix}cashback_webhooks"
+    payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+
+    for attempt in range(1, _max_retries + 1):
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    # Check if a failed duplicate exists that should be retried
+                    cur.execute(
+                        f"SELECT `id`, `processing_status` FROM `{table}` "
+                        f"WHERE `payload_hash` = %s LIMIT 1",
+                        (payload_hash,),
+                    )
+                    existing = cur.fetchone()
+
+                    if existing is not None:
+                        status = existing.get("processing_status")
+                        if status in _RETRYABLE_STATUSES:
+                            # Delete failed record to allow reprocessing
+                            cur.execute(
+                                f"DELETE FROM `{table}` WHERE `id` = %s",
+                                (existing["id"],),
+                            )
+                            conn.commit()
+                            logger.info(
+                                "Deleted failed webhook id=%s (status=%s) for reprocessing",
+                                existing["id"], status,
+                            )
+                        else:
+                            # Already processed successfully — true duplicate
+                            return None
+
+                    cur.execute(
+                        f"INSERT IGNORE INTO `{table}` "
+                        f"(`payload`, `network_slug`, `received_at`) "
+                        f"VALUES (%s, %s, UTC_TIMESTAMP())",
+                        (payload_json, network_slug),
+                    )
+                    conn.commit()
+                    if cur.rowcount == 0:
+                        return None  # race condition: another worker inserted first
+                    return cur.lastrowid
+        except pymysql.err.OperationalError as e:
+            if e.args[0] == 1213 and attempt < _max_retries:
+                logger.warning("Deadlock on save_raw_webhook, retry %d/%d", attempt, _max_retries)
+                time.sleep(0.1 * (2 ** attempt) + random.uniform(0, 0.05))
+                continue
+            logger.exception("Failed to save raw webhook")
+            return None
+        except Exception:
+            logger.exception("Failed to save raw webhook")
+            return None
+    return None
+
+
+def update_webhook_processing_status(webhook_id: int, status: str) -> None:
+    """Update processing_status in cashback_webhooks after click_id validation."""
+    prefix = _prefix()
+    table = f"{prefix}cashback_webhooks"
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE `{table}` SET `processing_status` = %s WHERE `id` = %s",
+                    (status, webhook_id),
+                )
+                conn.commit()
+    except Exception:
+        logger.exception("Failed to update webhook processing_status id=%s", webhook_id)
+
+
+def check_click_id_and_get_user(click_id: str) -> tuple[bool, int]:
+    """
+    Check if click_id exists in cashback_click_log.
+    Returns (exists, user_id_from_log).
+
+    user_id = 0 means unregistered click — the BIGINT column stores 0 for guests
+    (the plugin sends subid2='unregistered' in the affiliate URL, but click_log
+    stores the integer user_id: 0 for guests, real ID for logged-in users).
+
+    No FK — click_log is cleaned every 90 days. This is a point-in-time check only.
+    """
+    prefix = _prefix()
+    table = f"{prefix}cashback_click_log"
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT `user_id` FROM `{table}` WHERE `click_id` = %s LIMIT 1",
+                    (click_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return False, 0
+                return True, int(row["user_id"] or 0)
+    except Exception:
+        logger.exception("Failed to check click_id %s", click_id)
+        return False, 0
+
+
+def get_recent_webhooks(limit: int = 50) -> list[dict[str, Any]]:
+    prefix = _prefix()
+    table = f"{prefix}cashback_webhooks"
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT `id`, `received_at`, "
+                    f"LEFT(`payload`, 200) as payload_preview "
+                    f"FROM `{table}` ORDER BY `id` DESC LIMIT %s",
+                    (limit,),
+                )
+                return cur.fetchall()
+    except Exception as e:
+        logger.warning("Failed to get recent webhooks: %s", e)
+        return []
+
+
+# ============================================================
+# wp_users — check user exists
+# ============================================================
+
+def check_user_exists(user_id: int) -> bool:
+    prefix = _prefix()
+    table = f"{prefix}users"
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT 1 FROM `{table}` WHERE `ID` = %s LIMIT 1",
+                    (user_id,),
+                )
+                return cur.fetchone() is not None
+    except Exception:
+        logger.exception("Failed to check user %s", user_id)
+        return False
+
+
+# Regex: ровно 32 hex-символа (lowercase) — формат partner_token
+_PARTNER_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def resolve_partner_token(token: str) -> int | None:
+    """
+    Resolve partner_token → user_id via cashback_user_profile.
+    Returns user_id (int) or None if token not found.
+    """
+    if not _PARTNER_TOKEN_RE.match(token):
+        return None
+
+    prefix = _prefix()
+    table = f"{prefix}cashback_user_profile"
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT `user_id` FROM `{table}` WHERE `partner_token` = %s LIMIT 1",
+                    (token,),
+                )
+                row = cur.fetchone()
+                if row is not None:
+                    return int(row["user_id"])
+                return None
+    except Exception:
+        logger.exception("Failed to resolve partner_token %s", token)
+        return None
+
+
+# ============================================================
+# cashback_transactions / cashback_unregistered_transactions
+# Matches actual schema with all columns
+# ============================================================
+
+def insert_transaction(data: dict[str, Any], registered: bool) -> tuple[bool, str, int]:
+    """
+    Insert into cashback_transactions or cashback_unregistered_transactions.
+    Columns are built dynamically from data keys (driven by network mapping).
+    Returns (success, reason, insert_id).
+    """
+    prefix = _prefix()
+
+    if registered:
+        table = f"{prefix}cashback_transactions"
+    else:
+        table = f"{prefix}cashback_unregistered_transactions"
+
+    # Build idempotency key from uniq_id + partner + click_id
+    idemp_src = (
+        f"{data.get('uniq_id', '')}_"
+        f"{data.get('partner_name', '')}_"
+        f"{data.get('user_id', '')}_"
+        f"{data.get('click_id', '')}"
+    )
+    idempotency_key = hashlib.sha256(idemp_src.encode("utf-8")).hexdigest()
+
+    # Build columns and values dynamically from data
+    columns: list[str] = []
+    values: list[Any] = []
+
+    for field, value in data.items():
+        col_name = _FIELD_TO_COLUMN.get(field, field)
+        if not _COLUMN_NAME_RE.match(col_name):
+            logger.warning("Skipping invalid column name: %s", col_name)
+            continue
+        columns.append(f"`{col_name}`")
+        values.append(_coerce_value(value, field))
+
+    # Always add idempotency_key
+    columns.append("`idempotency_key`")
+    values.append(idempotency_key)
+
+    col_list = ", ".join(columns)
+    placeholders = ", ".join(["%s"] * len(columns))
+    sql = f"INSERT INTO `{table}` ({col_list}) VALUES ({placeholders})"
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, tuple(values))
+                conn.commit()
+                return True, "OK", cur.lastrowid or 0
+    except pymysql.err.IntegrityError as e:
+        if e.args[0] == 1062:  # Duplicate entry
+            return False, "duplicate", 0
+        if e.args[0] == 1452:  # FK constraint (user doesn't exist)
+            return False, "fk_user_not_found", 0
+        return False, str(e), 0
+    except Exception as e:
+        logger.exception("Failed to insert transaction")
+        return False, str(e), 0
+
+
+def update_transaction_status(
+    uniq_id: str, partner_name: str, new_status: str
+) -> tuple[bool, str]:
+    """Update order_status for existing transaction."""
+    prefix = _prefix()
+
+    allowed = _get_allowed_statuses()
+    if new_status not in allowed:
+        return False, f"Invalid status: {new_status}"
+
+    for tbl_suffix in ("cashback_transactions", "cashback_unregistered_transactions"):
+        table = f"{prefix}{tbl_suffix}"
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"UPDATE `{table}` SET `order_status` = %s "
+                        f"WHERE `uniq_id` = %s AND `partner` = %s "
+                        f"AND `order_status` NOT IN ('balance')",
+                        (new_status, uniq_id, partner_name),
+                    )
+                    conn.commit()
+                    if cur.rowcount > 0:
+                        return True, "updated"
+        except Exception as e:
+            logger.warning("Update failed on %s: %s", table, e)
+
+    return False, "not_found"
+
+
+def update_transaction_fields(
+    uniq_id: str,
+    partner_name: str,
+    sum_order: Any,
+    comission: Any,
+    order_status: str,
+    click_id: str = "",
+) -> tuple[bool, str]:
+    """
+    Update sum_order, comission, order_status for an existing transaction.
+    Used when a duplicate webhook arrives with changed field values.
+    Skips records with order_status='balance' (protected state).
+    If click_id is provided, adds it to WHERE to ensure only the transaction
+    tied to that specific click is updated.
+    """
+    prefix = _prefix()
+
+    allowed_statuses = _get_allowed_statuses()
+    if order_status not in allowed_statuses:
+        return False, f"Invalid status: {order_status}"
+
+    sum_order_val = _coerce_value(sum_order, "sum_order")
+    comission_val = _coerce_value(comission, "comission")
+
+    for tbl_suffix in ("cashback_transactions", "cashback_unregistered_transactions"):
+        table = f"{prefix}{tbl_suffix}"
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    if click_id:
+                        cur.execute(
+                            f"UPDATE `{table}` SET "
+                            f"`sum_order` = %s, `comission` = %s, `order_status` = %s "
+                            f"WHERE `uniq_id` = %s AND `partner` = %s AND `click_id` = %s "
+                            f"AND `order_status` NOT IN ('balance')",
+                            (sum_order_val, comission_val, order_status, uniq_id, partner_name, click_id),
+                        )
+                    else:
+                        cur.execute(
+                            f"UPDATE `{table}` SET "
+                            f"`sum_order` = %s, `comission` = %s, `order_status` = %s "
+                            f"WHERE `uniq_id` = %s AND `partner` = %s "
+                            f"AND `order_status` NOT IN ('balance')",
+                            (sum_order_val, comission_val, order_status, uniq_id, partner_name),
+                        )
+                    conn.commit()
+                    if cur.rowcount > 0:
+                        return True, "updated"
+        except Exception as e:
+            logger.warning("Update fields failed on %s: %s", table, e)
+
+    return False, "not_found"
+
+
+def enqueue_notification(
+    event_type: str,
+    transaction_id: int,
+    user_id: int,
+    new_status: str,
+    old_status: str | None = None,
+    extra_data: str | None = None,
+    *,
+    already_sent: bool = False,
+) -> None:
+    """
+    Insert a row into cashback_notification_queue for WP Cron email processing.
+    If already_sent=True, marks as processed so WP Cron won't send a duplicate.
+    """
+    if user_id <= 0:
+        return
+    prefix = _prefix()
+    table = f"{prefix}cashback_notification_queue"
+    processed = 1 if already_sent else 0
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"INSERT INTO `{table}` "
+                    f"(event_type, transaction_id, user_id, old_status, new_status, extra_data, processed) "
+                    f"VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (event_type, transaction_id, user_id, old_status, new_status, extra_data, processed),
+                )
+                conn.commit()
+    except Exception:
+        logger.exception(
+            "Failed to enqueue notification: event=%s, tx=%s, user=%s",
+            event_type, transaction_id, user_id,
+        )
+
+
+def transaction_exists(click_id: str) -> bool:
+    """Check if a transaction with this click_id already exists in either transactions table."""
+    prefix = _prefix()
+    for tbl_suffix in ("cashback_transactions", "cashback_unregistered_transactions"):
+        table = f"{prefix}{tbl_suffix}"
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT 1 FROM `{table}` WHERE `click_id` = %s LIMIT 1",
+                        (click_id,),
+                    )
+                    if cur.fetchone() is not None:
+                        return True
+        except Exception as e:
+            logger.warning("transaction_exists check failed on %s: %s", table, e)
+    return False

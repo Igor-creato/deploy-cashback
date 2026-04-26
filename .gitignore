@@ -1,0 +1,70 @@
+# ═══════════════════════════════════════════════════════════
+# Что НЕ коммитим в git: всё, что генерируется install.sh,
+# приходит из бэкапа, или содержит secrets / runtime-данные.
+# ═══════════════════════════════════════════════════════════
+
+# Сгенерированные install.sh (не должны утечь в git)
+service/.env
+service/.env.local
+service/secrets/
+postback/.env
+postback/.env.local
+
+# Runtime БД и кэши
+service/volumes/mariadb/data/
+service/volumes/redis/
+
+# WordPress: ядро ставится из образа, контент — из бэкапа
+service/volumes/wordpress/wp-admin/
+service/volumes/wordpress/wp-includes/
+service/volumes/wordpress/wp-content/cache/
+service/volumes/wordpress/wp-content/upgrade/
+service/volumes/wordpress/wp-content/uploads/
+service/volumes/wordpress/wp-content/ai1wm-backups/
+service/volumes/wordpress/wp-content/plugins/
+service/volumes/wordpress/wp-content/themes/
+service/volumes/wordpress/wp-content/languages/
+service/volumes/wordpress/wp-content/mu-plugins/
+service/volumes/wordpress/wp-*.php
+service/volumes/wordpress/index.php
+service/volumes/wordpress/license.txt
+service/volumes/wordpress/readme.html
+service/volumes/wordpress/xmlrpc.php
+
+# TLS-сертификаты (приватные ключи!)
+service/volumes/traefik/acme.json
+
+# Runtime-данные мониторинга и WAF
+service/volumes/grafana_data/
+service/volumes/vm_data/
+service/volumes/vlogs_data/
+service/volumes/crowdsec_config/
+service/volumes/crowdsec_data/
+
+# Логи
+service/volumes/nginx-logs/
+service/volumes/modsec-logs/
+service/volumes/traefik-logs/
+*.log
+
+# Бэкапы (не лежат в репо)
+backup/
+backups/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# IDE / ОС
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

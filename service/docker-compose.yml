@@ -1,0 +1,736 @@
+networks:
+  proxy:
+    external: true
+  internal:
+    driver: bridge
+  db-shared:
+    external: true
+
+services:
+  # ═══════════════════════════════════════════
+  # Docker Socket Proxy — защита Docker socket
+  # ═══════════════════════════════════════════
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:v0.4.2
+    container_name: docker-socket-proxy
+    restart: always
+    mem_limit: 64m
+    mem_reservation: 16m
+    environment:
+      CONTAINERS: 1
+      NETWORKS: 1
+      SERVICES: 0
+      TASKS: 0
+      INFO: 1
+      POST: 0
+      BUILD: 0
+      COMMIT: 0
+      CONFIGS: 0
+      DISTRIBUTION: 0
+      EXEC: 0
+      IMAGES: 0
+      NODES: 0
+      PLUGINS: 0
+      SECRETS: 0
+      SWARM: 0
+      SYSTEM: 0
+      VOLUMES: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - proxy
+    logging:
+      driver: json-file
+      options:
+        max-size: '5m'
+        max-file: '3'
+
+  # ═══════════════════════════════════════════
+  # Traefik — reverse proxy + SSL
+  # ═══════════════════════════════════════════
+  traefik:
+    image: traefik:v3.6.14
+    container_name: traefik
+    restart: always
+    mem_limit: 256m
+    mem_reservation: 64m
+    depends_on:
+      docker-socket-proxy:
+        condition: service_started
+    ports:
+      - '80:80'
+      - '443:443'
+    environment:
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+    volumes:
+      - ./volumes/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./volumes/traefik/config.yml:/etc/traefik/config.yml:ro
+      - ./volumes/traefik/acme.json:/acme.json
+      - traefik_logs:/var/log/traefik
+    command:
+      - '--configFile=/etc/traefik/traefik.yml'
+    networks:
+      - proxy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:8082/ping || exit 1']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '5'
+
+  # ═══════════════════════════════════════════
+  # MariaDB
+  # ═══════════════════════════════════════════
+  mariadb:
+    image: mariadb:11.8
+    container_name: mariadb
+    restart: always
+    mem_limit: 1536m
+    mem_reservation: 512m
+    networks:
+      - internal
+      - db-shared
+    ports:
+      - '127.0.0.1:33306:3306'
+    environment:
+      TZ: UTC
+      MARIADB_AUTO_UPGRADE: '1'
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_root_password
+      - db_password
+    volumes:
+      - ./volumes/mariadb/data:/var/lib/mysql
+      - ./volumes/mariadb/conf.d:/etc/mysql/conf.d:ro
+      - ./volumes/mariadb/initdb.d:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD', 'healthcheck.sh', '--connect', '--innodb_initialized']
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '5'
+
+  # ═══════════════════════════════════════════
+  # Redis — object cache (db=0 WordPress, db=1 App)
+  # ═══════════════════════════════════════════
+  redis:
+    image: redis:8.6.2-alpine
+    container_name: redis
+    restart: always
+    mem_limit: 320m
+    mem_reservation: 128m
+    networks:
+      - internal
+      - db-shared
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
+      --tcp-keepalive 60
+      --timeout 300
+      --hz 10
+      --lfu-log-factor 10
+      --activedefrag yes
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: '5m'
+        max-file: '3'
+
+  # ═══════════════════════════════════════════
+  # WordPress + PHP-FPM
+  # ═══════════════════════════════════════════
+  wordpress:
+    build: .
+    image: wordpress-custom:php8.4-fpm
+    container_name: wordpress
+    restart: always
+    mem_limit: 1536m
+    mem_reservation: 512m
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - internal
+    environment:
+      WORDPRESS_DB_HOST: mariadb:3306
+      WORDPRESS_DB_NAME: ${MYSQL_DATABASE}
+      WORDPRESS_DB_USER: ${MYSQL_USER}
+      WORDPRESS_DB_PASSWORD_FILE: /run/secrets/db_password
+      WORDPRESS_CONFIG_EXTRA: |
+        /* ── Memory ── */
+        define('WP_MEMORY_LIMIT', '256M');
+        define('WP_MAX_MEMORY_LIMIT', '512M');
+
+        /* ── SSL behind proxy ── */
+        define('FORCE_SSL_ADMIN', true);
+        if (isset($$_SERVER['HTTP_X_FORWARDED_PROTO']) && strpos($$_SERVER['HTTP_X_FORWARDED_PROTO'], 'https') !== false) {
+          $$_SERVER['HTTPS'] = 'on';
+        }
+
+        /* ── Redis Object Cache ── */
+        define('WP_REDIS_HOST', 'redis');
+        define('WP_REDIS_PORT', 6379);
+        define('WP_REDIS_DATABASE', 0);
+        define('WP_REDIS_TIMEOUT', 1);
+        define('WP_REDIS_READ_TIMEOUT', 1);
+
+        /* ── Security ── */
+        define('DISALLOW_FILE_EDIT', true);
+        define('WP_AUTO_UPDATE_CORE', 'minor');
+        define('WP_POST_REVISIONS', 5);
+        define('EMPTY_TRASH_DAYS', 7);
+        define('WP_CRON_LOCK_TIMEOUT', 120);
+
+        /* ── Performance ── */
+        define('DISABLE_WP_CRON', true);
+        define('CONCATENATE_SCRIPTS', false);
+        define('WP_CACHE', true);
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER}
+      # Пароль читается из docker secret в docker-entrypoint-msmtp.sh.
+      # SMTP_PASSWORD через env-var больше НЕ передаём — иначе видно в `docker inspect`.
+      SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+      SMTP_SECURE: ${SMTP_SECURE:-tls}
+      SMTP_FROM: ${SMTP_FROM}
+    secrets:
+      - db_password
+      - smtp_password
+    volumes:
+      - ./volumes/wordpress:/var/www/html
+      - ./volumes/php-config/wordpress.ini:/usr/local/etc/php/conf.d/wordpress.ini:ro
+      - ./volumes/php-config/www.conf:/usr/local/etc/php-fpm.d/zz-www.conf:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'php-fpm-healthcheck || kill -0 1']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 180s
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '5'
+
+  modsecurity:
+    image: owasp/modsecurity-crs:4.25.0-nginx-alpine-202604040104
+    container_name: modsecurity
+    restart: always
+    mem_limit: 384m
+    mem_reservation: 96m
+    networks:
+      - proxy # принимает от Traefik
+      - internal # отдаёт в Nginx
+    depends_on:
+      nginx:
+        condition: service_healthy
+    environment:
+      - BACKEND=http://nginx:80
+      - PARANOIA=1
+      - ANOMALY_INBOUND=5
+      - ANOMALY_OUTBOUND=4
+      - MODSEC_RULE_ENGINE=DetectionOnly # первые 1-2 недели только логи
+      - ALLOWED_METHODS=GET HEAD POST OPTIONS PUT PATCH DELETE
+      - MAX_FILE_SIZE=67108864
+      # ── Audit log в shared volume для CrowdSec ──
+      - MODSEC_AUDIT_ENGINE=RelevantOnly
+      - MODSEC_AUDIT_LOG_TYPE=Serial
+      - MODSEC_AUDIT_LOG=/var/log/modsec/modsec_audit.log
+      - MODSEC_AUDIT_LOG_FORMAT=JSON
+      # Логировать только 5xx и аномальные 4xx (исключая 404/403) — режет ~70% шума
+      - MODSEC_AUDIT_LOG_RELEVANT_STATUS=^(?:5|4(?!04|03))
+      # Подключить WordPress-исключения ПЕРЕД CRS правилами (нужно для ctl:ruleRemoveById)
+      - MODSEC_INCLUDE=/etc/modsecurity.d/local-rules/*.conf
+    volumes:
+      - ./volumes/modsec-logs:/var/log/modsec
+      - ./volumes/modsecurity/local-rules:/etc/modsecurity.d/local-rules:ro
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=proxy
+      - traefik.http.services.modsec-svc.loadbalancer.server.port=8080
+
+      # ── Основной сайт ──
+      - traefik.http.routers.wordpress-main.entrypoints=websecure
+      - traefik.http.routers.wordpress-main.rule=Host(`${DOMAIN}`)
+      - traefik.http.routers.wordpress-main.tls=true
+      - traefik.http.routers.wordpress-main.tls.certresolver=letsencrypt
+      - traefik.http.routers.wordpress-main.priority=10
+      - traefik.http.routers.wordpress-main.service=modsec-svc
+      - traefik.http.routers.wordpress-main.middlewares=ratelimit,wp-headers
+
+      # ── Админка (БЕЗ rate limit!) ──
+      - traefik.http.routers.wordpress-admin.entrypoints=websecure
+      - 'traefik.http.routers.wordpress-admin.rule=Host(`${DOMAIN}`) && PathPrefix(`/wp-admin`)'
+      - traefik.http.routers.wordpress-admin.tls=true
+      - traefik.http.routers.wordpress-admin.tls.certresolver=letsencrypt
+      - traefik.http.routers.wordpress-admin.priority=100
+      - traefik.http.routers.wordpress-admin.service=modsec-svc
+      - traefik.http.routers.wordpress-admin.middlewares=wp-headers
+
+      # ── Логин (ТОЛЬКО тут защита от брутфорса) ──
+      - traefik.http.routers.wordpress-login.entrypoints=websecure
+      - 'traefik.http.routers.wordpress-login.rule=Host(`${DOMAIN}`) && Path(`/wp-login.php`)'
+      - traefik.http.routers.wordpress-login.tls=true
+      - traefik.http.routers.wordpress-login.tls.certresolver=letsencrypt
+      - traefik.http.routers.wordpress-login.priority=200
+      - traefik.http.routers.wordpress-login.service=modsec-svc
+      - traefik.http.routers.wordpress-login.middlewares=wp-bruteforce,wp-headers
+
+      # ── Rate limit: основной сайт (NAT-safe для CGNAT пулов мобильных операторов) ──
+      # Внутренняя защита: plugin-level Group 13 NAT-safe RL (per-user для auth, subnet+UA для гостей)
+      - traefik.http.middlewares.ratelimit.ratelimit.average=500
+      - traefik.http.middlewares.ratelimit.ratelimit.burst=2000
+      - traefik.http.middlewares.ratelimit.ratelimit.period=1s
+      - traefik.http.middlewares.ratelimit.ratelimit.sourcecriterion.ipstrategy.depth=1
+
+      # ── Rate limit: /wp-login.php — адекватный для NAT, но режет одиночный brute-force ──
+      # Плагин НЕ хукается в wp_login_failed — Traefik тут единственный барьер
+      - traefik.http.middlewares.wp-bruteforce.ratelimit.average=30
+      - traefik.http.middlewares.wp-bruteforce.ratelimit.burst=100
+      - traefik.http.middlewares.wp-bruteforce.ratelimit.period=1s
+      - traefik.http.middlewares.wp-bruteforce.ratelimit.sourcecriterion.ipstrategy.depth=1
+
+      # ── Security headers ──
+      - traefik.http.middlewares.wp-headers.headers.customResponseHeaders.X-Frame-Options=SAMEORIGIN
+      - traefik.http.middlewares.wp-headers.headers.customResponseHeaders.X-Content-Type-Options=nosniff
+      - traefik.http.middlewares.wp-headers.headers.customResponseHeaders.Referrer-Policy=strict-origin-when-cross-origin
+      - traefik.http.middlewares.wp-headers.headers.customResponseHeaders.Permissions-Policy=camera=(), microphone=(), geolocation=()
+      - traefik.http.middlewares.wp-headers.headers.stsSeconds=31536000
+      - traefik.http.middlewares.wp-headers.headers.stsIncludeSubdomains=true
+      - traefik.http.middlewares.wp-headers.headers.stsPreload=true
+
+      #закрытие от поисковых ботов
+      #- traefik.http.middlewares.noindex.headers.customResponseHeaders.X-Robots-Tag=noindex, nofollow, noarchive, nosnippet
+      #- traefik.http.middlewares.basicauth.basicauth.users=admin:$$apr1$$8HLTOY/o$$PCSv4BPd6dhrvNzGmGSgq.
+      #- traefik.http.routers.wordpress-main.middlewares=ratelimit,wp-headers,noindex,basicauth
+
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:8080/nginx-health || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '5'
+
+  # ═══════════════════════════════════════════
+  # Nginx — web server + FastCGI cache
+  # ═══════════════════════════════════════════
+  nginx:
+    image: nginx:1.28.2-alpine
+    container_name: nginx
+    restart: always
+    mem_limit: 256m
+    mem_reservation: 64m
+    networks:
+      - internal
+    depends_on:
+      wordpress:
+        condition: service_healthy
+    volumes:
+      - ./volumes/wordpress:/var/www/html:ro
+      - ./volumes/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./volumes/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./volumes/nginx-logs:/var/log/nginx
+      - nginx_cache:/var/cache/nginx
+
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1/nginx-health || exit 1']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '5'
+
+  # ═══════════════════════════════════════════
+  # node-exporter — метрики хоста (CPU/RAM/диск)
+  # ═══════════════════════════════════════════
+  node-exporter:
+    image: prom/node-exporter:v1.11.1
+    container_name: node-exporter
+    restart: unless-stopped
+    mem_limit: 128m
+    mem_reservation: 32m
+    pid: host
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+      # textfile collector — backup.sh пишет сюда таймстамп успеха
+      - /var/lib/node_exporter/textfile_collector:/host/textfile:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+      - '--collector.textfile.directory=/host/textfile'
+    networks:
+      - internal
+    logging:
+      driver: json-file
+      options:
+        max-size: '5m'
+        max-file: '2'
+
+  # ═══════════════════════════════════════════
+  # cAdvisor — метрики Docker-контейнеров
+  # ═══════════════════════════════════════════
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.55.1
+    container_name: cadvisor
+    restart: unless-stopped
+    mem_limit: 768m
+    mem_reservation: 256m
+    command:
+      - '--docker_only=true'
+      - '--housekeeping_interval=30s'
+      - '--max_housekeeping_interval=60s'
+      - '--disable_metrics=disk,diskIO,tcp,udp,sched,process,hugetlb,referenced_memory'
+      - '--event_storage_event_limit=default=0'
+      - '--event_storage_age_limit=default=0'
+    depends_on:
+      modsecurity:
+        condition: service_healthy
+    environment:
+      - DOCKER_API_VERSION=1.44
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /run/containerd/containerd.sock:/run/containerd/containerd.sock:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks:
+      - internal
+    logging:
+      driver: json-file
+      options:
+        max-size: '5m'
+        max-file: '2'
+
+  # ═══════════════════════════════════════════
+  # mysqld-exporter — метрики MariaDB (slow queries, connections)
+  # ═══════════════════════════════════════════
+  mysqld-exporter:
+    image: prom/mysqld-exporter:v0.19.0
+    container_name: mysqld-exporter
+    restart: unless-stopped
+    mem_limit: 64m
+    mem_reservation: 16m
+    command:
+      - '--mysqld.address=mariadb:3306'
+      - '--mysqld.username=exporter'
+      - '--collect.global_status'
+      - '--collect.global_variables'
+      - '--collect.info_schema.processlist'
+      - '--collect.info_schema.innodb_metrics'
+    environment:
+      # mysqld-exporter v0.16+ читает пароль из MYSQLD_EXPORTER_PASSWORD env-var.
+      # Значение берём из .env (он chmod 600); этот же пароль установлен у
+      # MariaDB-пользователя 'exporter' через ALTER USER в скрипте setup-mariadb-users.sh.
+      MYSQLD_EXPORTER_PASSWORD: ${MYSQL_EXPORTER_PASSWORD}
+    networks:
+      - internal
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: '5m'
+        max-file: '2'
+
+  # ═══════════════════════════════════════════
+  # redis-exporter — метрики Redis (memory, DLQ size)
+  # ═══════════════════════════════════════════
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.66.0
+    container_name: redis-exporter
+    restart: unless-stopped
+    mem_limit: 64m
+    mem_reservation: 16m
+    command:
+      - '--redis.addr=redis://redis:6379'
+      - '--check-keys=webhook:dlq,webhook:queue'
+      - '--include-system-metrics'
+    networks:
+      - internal
+    depends_on:
+      redis:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: '5m'
+        max-file: '2'
+
+  # ═══════════════════════════════════════════
+  # php-fpm-exporter — метрики PHP-FPM пула (busy children)
+  # Использует pm.status_listen=0.0.0.0:9001 из www.conf
+  # ═══════════════════════════════════════════
+  php-fpm-exporter:
+    image: hipages/php-fpm_exporter:2.2.0
+    container_name: php-fpm-exporter
+    restart: unless-stopped
+    mem_limit: 64m
+    mem_reservation: 16m
+    environment:
+      PHP_FPM_SCRAPE_URI: 'tcp://wordpress:9001/fpm-status'
+      PHP_FPM_LOG_LEVEL: warn
+    networks:
+      - internal
+    depends_on:
+      wordpress:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: '5m'
+        max-file: '2'
+
+  # ═══════════════════════════════════════════
+  # VictoriaMetrics — сбор и хранение метрик
+  # ═══════════════════════════════════════════
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.140.0
+    container_name: victoriametrics
+    restart: unless-stopped
+    mem_limit: 1024m
+    mem_reservation: 256m
+    command:
+      - '--storageDataPath=/storage'
+      - '--retentionPeriod=30d'
+      - '--promscrape.config=/etc/victoriametrics/scrape.yml'
+      - '--httpListenAddr=:8428'
+    volumes:
+      - vm_data:/storage
+      - ./volumes/victoriametrics/scrape.yml:/etc/victoriametrics/scrape.yml:ro
+    networks:
+      - internal
+      - db-shared # чтобы достать webhook-worker:9100 из второго стека
+    depends_on:
+      - node-exporter
+      - cadvisor
+    logging:
+      driver: json-file
+      options:
+        max-size: '5m'
+        max-file: '2'
+
+  # ═══════════════════════════════════════════
+  # VictoriaLogs — хранилище логов (от авторов VictoriaMetrics)
+  # Принимает логи через Elasticsearch _bulk API и Loki API.
+  # Доступ через Grafana datasource victoriametrics-logs-datasource.
+  # ═══════════════════════════════════════════
+  victorialogs:
+    image: victoriametrics/victoria-logs:v1.50.0
+    container_name: victorialogs
+    restart: unless-stopped
+    mem_limit: 384m
+    mem_reservation: 96m
+    command:
+      - '--storageDataPath=/storage'
+      - '--retentionPeriod=14d'
+      - '--httpListenAddr=:9428'
+    volumes:
+      - vlogs_data:/storage
+    networks:
+      - internal
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:9428/health || exit 1']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: '5m'
+        max-file: '2'
+
+  # ═══════════════════════════════════════════
+  # Vector — log shipper (nginx, modsec, traefik, php-fpm stdout → VictoriaLogs)
+  # ═══════════════════════════════════════════
+  vector:
+    image: timberio/vector:0.55.0-alpine
+    container_name: vector
+    restart: unless-stopped
+    mem_limit: 128m
+    mem_reservation: 32m
+    command: ['--config', '/etc/vector/vector.toml']
+    depends_on:
+      victorialogs:
+        condition: service_healthy
+    volumes:
+      - ./volumes/vector/vector.toml:/etc/vector/vector.toml:ro
+      - ./volumes/nginx-logs:/var/log/nginx:ro
+      - ./volumes/modsec-logs:/var/log/modsec:ro
+      - traefik_logs:/var/log/traefik:ro
+    networks:
+      - internal
+    logging:
+      driver: json-file
+      options:
+        max-size: '5m'
+        max-file: '2'
+
+  # ═══════════════════════════════════════════
+  # Grafana — визуализация и алерты в Telegram
+  # Доступ: ssh -L 3000:127.0.0.1:3000 user@server
+  # Затем открыть: http://localhost:3000
+  # ═══════════════════════════════════════════
+  grafana:
+    image: grafana/grafana:12.4.1
+    container_name: grafana
+    restart: unless-stopped
+    mem_limit: 384m
+    mem_reservation: 128m
+    ports:
+      - '127.0.0.1:3000:3000' # только localhost — доступ через SSH-туннель
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      # *__FILE — нативная фича Grafana: пароль читается из файла, а сам путь
+      # (а не значение) светится в `docker inspect`. См. https://grafana.com/docs/grafana/latest/setup-grafana/configure-security/configure-database-encryption/
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_AUTH_ANONYMOUS_ENABLED: 'false'
+      GF_SERVER_ROOT_URL: http://localhost:3000
+      # VictoriaLogs datasource plugin
+      GF_INSTALL_PLUGINS: 'victoriametrics-logs-datasource'
+      # ── SMTP (те же реквизиты что у WordPress) ──
+      GF_SMTP_ENABLED: 'true'
+      GF_SMTP_HOST: ${SMTP_HOST}:${SMTP_PORT:-587}
+      GF_SMTP_USER: ${SMTP_USER}
+      GF_SMTP_PASSWORD__FILE: /run/secrets/smtp_password
+      GF_SMTP_FROM_ADDRESS: ${SMTP_FROM}
+      GF_SMTP_FROM_NAME: 'Grafana Monitor'
+      GF_SMTP_STARTTLS_POLICY: 'MandatoryStartTLS'
+    secrets:
+      - grafana_admin_password
+      - smtp_password
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./volumes/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./volumes/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - internal
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:3000/api/health || exit 1']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: '5m'
+        max-file: '2'
+
+  # ═══════════════════════════════════════════
+  # CrowdSec — IDS/IPS, режим обучения (без bouncer)
+  # Парсит логи Traefik/Nginx/ModSecurity, копит децизии
+  # в локальной БД, но НЕ применяет их (bouncer добавим
+  # после 1-2 недель калибровки whitelist'ов).
+  # CAPI: анонимная регистрация на первом старте →
+  # community blocklist в локальной БД.
+  # ═══════════════════════════════════════════
+  crowdsec:
+    image: crowdsecurity/crowdsec:v1.7.7
+    container_name: crowdsec
+    restart: always
+    mem_limit: 256m
+    mem_reservation: 96m
+    networks:
+      - internal
+    environment:
+      TZ: UTC
+      COLLECTIONS: >-
+        crowdsecurity/linux
+        crowdsecurity/traefik
+        crowdsecurity/nginx
+        crowdsecurity/base-http-scenarios
+        crowdsecurity/http-cve
+        crowdsecurity/wordpress
+        crowdsecurity/modsecurity
+      USE_WAL: 'true'
+    volumes:
+      - crowdsec_config:/etc/crowdsec
+      - crowdsec_data:/var/lib/crowdsec/data
+      - ./volumes/crowdsec/acquis.yaml:/etc/crowdsec/acquis.yaml:ro
+      - traefik_logs:/var/log/traefik:ro
+      - ./volumes/nginx-logs:/var/log/nginx:ro
+      - ./volumes/modsec-logs:/var/log/modsec:ro
+    healthcheck:
+      test: ['CMD', 'cscli', 'lapi', 'status']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '5'
+
+# ═══════════════════════════════════════════
+# Volumes
+# ═══════════════════════════════════════════
+volumes:
+  nginx_cache:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=512m,uid=101,gid=101
+  traefik_logs:
+    driver: local
+  vm_data:
+  vlogs_data:
+  grafana_data:
+  crowdsec_config:
+  crowdsec_data:
+
+# ═══════════════════════════════════════════
+# Secrets
+# ═══════════════════════════════════════════
+secrets:
+  db_root_password:
+    file: ./secrets/db_root_password.txt
+  db_password:
+    file: ./secrets/db_password.txt
+  smtp_password:
+    file: ./secrets/smtp_password.txt
+  grafana_admin_password:
+    file: ./secrets/grafana_admin_password.txt

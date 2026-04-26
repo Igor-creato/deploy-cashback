@@ -1,0 +1,89 @@
+# ═══════════════════════════════════════════
+# Traefik v3 — Production Configuration
+# ═══════════════════════════════════════════
+
+entryPoints:
+  web:
+    address: ':80'
+    http:
+      encodedCharacters:
+        allowEncodedSlash: false
+        allowEncodedBackSlash: false
+        allowEncodedNullCharacter: false
+        allowEncodedSemicolon: false
+        allowEncodedPercent: false
+        allowEncodedQuestionMark: false
+        allowEncodedHash: false
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+  websecure:
+    address: ':443'
+    http:
+      encodedCharacters:
+        allowEncodedSlash: false
+        allowEncodedBackSlash: false
+        allowEncodedNullCharacter: false
+        allowEncodedSemicolon: false
+        allowEncodedPercent: false
+        allowEncodedQuestionMark: false
+        allowEncodedHash: false
+      tls:
+        certResolver: letsencrypt
+    transport:
+      respondingTimeouts:
+        readTimeout: 300s
+        writeTimeout: 300s
+        idleTimeout: 120s
+    forwardedHeaders:
+      insecure: false
+      trustedIPs:
+        - '127.0.0.1/32'
+        - '10.0.0.0/8'
+        - '172.16.0.0/12'
+        - '192.168.0.0/16'
+  ping:
+    address: ':8082'
+
+providers:
+  docker:
+    endpoint: 'tcp://docker-socket-proxy:2375'
+    exposedByDefault: false
+    network: proxy
+    watch: true
+  file:
+    filename: '/etc/traefik/config.yml'
+    watch: true
+
+# Dashboard отключён в production
+api:
+  dashboard: false
+  insecure: false
+
+log:
+  level: WARN
+  format: json
+
+accessLog:
+  filePath: /var/log/traefik/access.log
+  format: json
+  bufferingSize: 100
+  filters:
+    statusCodes:
+      - '400-599'
+    retryAttempts: true
+    minDuration: '500ms'
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: '__ACME_EMAIL__'
+      storage: acme.json
+      httpChallenge:
+        entryPoint: web
+
+# Пинг для healthcheck
+ping:
+  entryPoint: ping

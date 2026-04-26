@@ -1,0 +1,20 @@
+# Линукс-скрипты должны чекаут-ниться с LF независимо от платформы.
+# Иначе CRLF в shebang ломает выполнение на сервере:
+#   /bin/bash^M: bad interpreter: No such file or directory
+*.sh           text eol=lf
+*.bash         text eol=lf
+*.cnf          text eol=lf
+*.conf         text eol=lf
+*.yml          text eol=lf
+*.yaml         text eol=lf
+*.toml         text eol=lf
+*.env          text eol=lf
+.env*          text eol=lf
+Dockerfile     text eol=lf
+docker-entrypoint*.sh text eol=lf
+
+# Бинарные — никаких преобразований.
+*.png          binary
+*.jpg          binary
+*.gz           binary
+*.tar          binary
