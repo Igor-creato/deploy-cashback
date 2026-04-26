@@ -226,8 +226,8 @@ printf '%s' "$SMTP_PASSWORD"       > "$INSTALL_DIR/secrets/smtp_password.txt"
 printf '%s' "$GRAFANA_PASSWORD"    > "$INSTALL_DIR/secrets/grafana_admin_password.txt"
 
 chmod 700 "$INSTALL_DIR/secrets"
-chmod 644 "$INSTALL_DIR/secrets/"*.txt
-log "Docker secrets созданы (dir 0700, files 0644)"
+chmod 600 "$INSTALL_DIR/secrets/"*.txt
+log "Docker secrets созданы (dir 0700, files 0600)"
 
 # ─── Traefik acme.json ────────────────────────────────────
 touch "$INSTALL_DIR/volumes/traefik/acme.json"
