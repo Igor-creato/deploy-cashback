@@ -26,6 +26,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     less \
     && rm -rf /var/lib/apt/lists/*
 
+# ── getaddrinfo: предпочитать IPv4 ──
+# Контейнер сидит в bridge-сети без IPv6-egress, но DNS отдаёт AAAA первым.
+# PHP-streams (fsockopen/stream_socket_client) не умеют Happy Eyeballs и
+# зависают на default_socket_timeout=30s, пытаясь достучаться до AAAA.
+# Эта строка переопределяет приоритет в getaddrinfo: IPv4-маппированные
+# адреса получают вес 100 и идут первыми.
+RUN printf 'precedence ::ffff:0:0/96 100\n' >> /etc/gai.conf
+
 # ── PhpRedis (нативный клиент Redis) ──
 # Без него Redis Object Cache откатывается на Predis (PHP-эмуляция протокола),
 # что даёт ×5–×10 латентность на каждое обращение к Redis. На WooCommerce
