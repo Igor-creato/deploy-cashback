@@ -345,6 +345,7 @@ groups:
                   reducer: { type: last }
               type: threshold
         for: 5m
+        noDataState: Alerting
         labels: { severity: warning }
         annotations:
           summary: 'Webhook DLQ растёт — postbacks не обрабатываются'
@@ -368,6 +369,7 @@ groups:
                   reducer: { type: last }
               type: threshold
         for: 1m
+        noDataState: OK
         labels: { severity: critical }
         annotations:
           summary: 'Worker не обрабатывает очередь: есть сообщения, но >10 минут без прогресса'
@@ -391,6 +393,7 @@ groups:
                   reducer: { type: last }
               type: threshold
         for: 30m
+        noDataState: Alerting
         labels: { severity: critical }
         annotations:
           summary: 'Не было успешного бэкапа MariaDB >26 часов'
