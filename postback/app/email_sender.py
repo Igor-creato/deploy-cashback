@@ -7,16 +7,26 @@ Sender name/email are read from WordPress settings (wp_options):
   - cashback_email_sender_name  (fallback: blogname)
   - cashback_email_sender_email (fallback: admin_email)
 
+Brand color, logo and signature also mirror WP-plugin sources
+(class-cashback-theme-color.php + class-cashback-email-sender.php),
+so emails sent from this service look identical to those sent
+through wp_mail() by the plugin.
+
 Site URL is built from DOMAIN env var (shared .env).
 """
+import html as _html_lib
 import logging
 import os
+import re
 import smtplib
+import time
 from email.header import Header
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr
 from typing import Any
+
+import phpserialize
 
 from app.db import get_conn
 
@@ -193,51 +203,336 @@ def _is_notification_enabled(user_id: int, notification_type: str) -> bool:
 
 
 # =====================================================================
+# Branding (brand color, logo, signature) — mirrors WP plugin
+# Sources: includes/class-cashback-theme-color.php
+#          notifications/class-cashback-email-sender.php (get_logo_url)
+# =====================================================================
+
+_BRAND_FALLBACK_COLOR = "#2271b1"
+_HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+_BRANDING_CACHE_TTL = 300  # 5 minutes
+_branding_cache: dict[str, Any] = {}
+_branding_cache_ts: float = 0.0
+
+
+def _php_unserialize(value: Any) -> Any:
+    """
+    Safely PHP-unserialize a wp_options value. Returns the decoded value or
+    None on any error (broken data must not break email rendering).
+    """
+    if not value:
+        return None
+    if isinstance(value, str):
+        data = value.encode("utf-8", errors="replace")
+    elif isinstance(value, (bytes, bytearray)):
+        data = bytes(value)
+    else:
+        return None
+    try:
+        return phpserialize.loads(data, decode_strings=True)
+    except Exception:  # pylint: disable=broad-except
+        return None
+
+
+def _normalize_hex(value: Any) -> str | None:
+    """
+    Normalize a color value to '#RRGGBB' or return None.
+    Supports Woodmart array form {'idle': '#hex'} and plain strings.
+    """
+    if isinstance(value, dict):
+        value = value.get("idle", "")
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if value == "":
+        return None
+    if _HEX_RE.match(value):
+        return value
+    return None
+
+
+def _get_active_stylesheet() -> str:
+    """Return active theme directory slug (wp_options.stylesheet)."""
+    return _get_wp_option("stylesheet") or ""
+
+
+def _get_theme_mods(stylesheet: str) -> dict[str, Any]:
+    """Read theme_mods_<stylesheet> as a dict (PHP-serialized)."""
+    if not stylesheet:
+        return {}
+    raw = _get_wp_option(f"theme_mods_{stylesheet}")
+    decoded = _php_unserialize(raw)
+    if isinstance(decoded, dict):
+        return decoded
+    return {}
+
+
+def _get_brand_color() -> str:
+    """
+    Brand color resolution chain (mirrors Cashback_Theme_Color::get_brand_color):
+      1) wp_options.xts-woodmart-options['primary-color']
+      2) theme_mods_<stylesheet>['primary-color']
+      3) fallback #2271b1
+    """
+    # Woodmart options
+    woodmart = _php_unserialize(_get_wp_option("xts-woodmart-options"))
+    if isinstance(woodmart, dict) and "primary-color" in woodmart:
+        hx = _normalize_hex(woodmart["primary-color"])
+        if hx:
+            return hx
+
+    # Standard Customizer API
+    mods = _get_theme_mods(_get_active_stylesheet())
+    if "primary-color" in mods:
+        hx = _normalize_hex(mods["primary-color"])
+        if hx:
+            return hx
+
+    return _BRAND_FALLBACK_COLOR
+
+
+def _get_contrast_text_color(hex_color: str) -> str:
+    """
+    Pick readable text color (#ffffff or #1a1a1a) for the given background.
+    Uses luma threshold 170 to match Cashback_Theme_Color::get_contrast_text_color
+    (mid-bright brand colors like Woodmart green #83b735, luma≈152, get white text).
+    """
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        return "#ffffff"
+    try:
+        r = int(h[0:2], 16)
+        g = int(h[2:4], 16)
+        b = int(h[4:6], 16)
+    except ValueError:
+        return "#ffffff"
+    luma = 0.299 * r + 0.587 * g + 0.114 * b
+    return "#1a1a1a" if luma >= 170 else "#ffffff"
+
+
+def _get_signature() -> str:
+    """Email signature appended after the body (wp_options.cashback_email_signature)."""
+    return _get_wp_option("cashback_email_signature") or ""
+
+
+def _attachment_guid(attachment_id: int) -> str | None:
+    """Return wp_posts.guid for an attachment id, or None."""
+    if attachment_id <= 0:
+        return None
+    from app.db import _prefix
+    prefix = _prefix()
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT `guid` FROM `{prefix}posts` "
+                    f"WHERE `ID` = %s AND `post_type` = 'attachment' LIMIT 1",
+                    (attachment_id,),
+                )
+                row = cur.fetchone()
+                if row and row.get("guid"):
+                    return str(row["guid"])
+    except Exception:  # pylint: disable=broad-except
+        logger.exception("Failed to read attachment guid id=%s", attachment_id)
+    return None
+
+
+def _find_logo_image_in_elements(elements: Any) -> dict[str, Any] | None:
+    """
+    Recursively walk Woodmart Header Builder elements tree looking for an
+    element with params.image. Mirrors find_logo_image_in_elements() in PHP.
+    """
+    if not isinstance(elements, (list, dict)):
+        return None
+    iterable = elements.values() if isinstance(elements, dict) else elements
+    for element in iterable:
+        if not isinstance(element, dict):
+            continue
+        params = element.get("params")
+        if isinstance(params, dict):
+            image = params.get("image")
+            if isinstance(image, dict) and (image.get("url") or image.get("id")):
+                return image
+        for nested_key in ("elements", "columns", "rows", "children"):
+            nested = element.get(nested_key)
+            if nested:
+                found = _find_logo_image_in_elements(nested)
+                if found is not None:
+                    return found
+    return None
+
+
+def _get_woodmart_logo_url() -> str | None:
+    """Mirror of Cashback_Email_Sender::get_woodmart_logo_url()."""
+    header_id = _get_wp_option("whb_main_header")
+    if not header_id:
+        return None
+    header_data = _php_unserialize(_get_wp_option(f"whb_{header_id}"))
+    if not isinstance(header_data, dict):
+        return None
+    elements = header_data.get("elements")
+    if not elements:
+        return None
+    image = _find_logo_image_in_elements(elements)
+    if image is None:
+        return None
+    url = image.get("url")
+    if isinstance(url, str) and url:
+        return url
+    image_id = image.get("id")
+    try:
+        image_id_int = int(image_id) if image_id is not None else 0
+    except (ValueError, TypeError):
+        image_id_int = 0
+    return _attachment_guid(image_id_int)
+
+
+def _get_logo_url() -> str | None:
+    """
+    Logo URL resolution chain (mirrors Cashback_Email_Sender::get_logo_url):
+      1) Woodmart Header Builder image
+      2) theme_mods.custom_logo (attachment ID → guid)
+      3) theme_mods.site_icon (attachment ID → guid)
+      4) None — header is rendered without <img>
+    """
+    woodmart_logo = _get_woodmart_logo_url()
+    if woodmart_logo:
+        return woodmart_logo
+
+    mods = _get_theme_mods(_get_active_stylesheet())
+
+    custom_logo = mods.get("custom_logo")
+    try:
+        custom_logo_id = int(custom_logo) if custom_logo is not None else 0
+    except (ValueError, TypeError):
+        custom_logo_id = 0
+    if custom_logo_id > 0:
+        url = _attachment_guid(custom_logo_id)
+        if url:
+            return url
+
+    site_icon = mods.get("site_icon")
+    try:
+        site_icon_id = int(site_icon) if site_icon is not None else 0
+    except (ValueError, TypeError):
+        site_icon_id = 0
+    if site_icon_id > 0:
+        url = _attachment_guid(site_icon_id)
+        if url:
+            return url
+
+    return None
+
+
+def _get_branding() -> dict[str, Any]:
+    """
+    Cached branding bundle (5 min TTL). Reading wp_options on every email
+    is cheap, but this also bounds the impact of broken serialized data.
+    """
+    global _branding_cache, _branding_cache_ts
+    now = time.time()
+    if _branding_cache and (now - _branding_cache_ts) < _BRANDING_CACHE_TTL:
+        return _branding_cache
+    brand_color = _get_brand_color()
+    branding = {
+        "brand_color": brand_color,
+        "text_color": _get_contrast_text_color(brand_color),
+        "logo_url": _get_logo_url(),
+        "signature": _get_signature(),
+    }
+    _branding_cache = branding
+    _branding_cache_ts = now
+    return branding
+
+
+# =====================================================================
 # HTML template
 # =====================================================================
 
 def _render_html(subject: str, body_text: str, site_name: str, user_id: int | None = None) -> str:
-    """Render HTML email template (matches WordPress Cashback_Email_Sender style)."""
+    """
+    Render HTML email template — mirrors Cashback_Email_Sender::render_html_template().
+    Brand color / logo / signature come from WordPress settings, so emails
+    sent from this service match those sent through wp_mail() by the plugin.
+    """
     site_url = _get_site_url() or "#"
+    branding = _get_branding()
+    brand_color = branding["brand_color"]
+    text_color = branding["text_color"]
+    logo_url = branding["logo_url"]
+    signature = branding["signature"]
 
     settings_link = ""
     if user_id and _get_site_url():
         settings_link = f"{_get_site_url()}/my-account/cashback-notifications/"
 
-    html = (
-        '<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">'
-        '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
-        f'<title>{_esc(subject)}</title></head>'
-        '<body style="margin:0;padding:0;background:#f4f4f7;font-family:Arial,Helvetica,sans-serif;">'
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f7;">'
-        '<tr><td align="center" style="padding:24px 16px;">'
+    parts: list[str] = [
+        '<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">',
+        '<meta name="viewport" content="width=device-width, initial-scale=1.0">',
+        f'<title>{_esc(subject)}</title></head>',
+        '<body style="margin:0;padding:0;background:#f4f4f7;font-family:Arial,Helvetica,sans-serif;">',
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f7;">',
+        '<tr><td align="center" style="padding:24px 16px;">',
         '<table role="presentation" width="600" cellpadding="0" cellspacing="0" '
-        'style="background:#ffffff;border-radius:8px;overflow:hidden;max-width:600px;width:100%;">'
+        'style="background:#ffffff;border-radius:8px;overflow:hidden;max-width:600px;width:100%;">',
         # Header
-        f'<tr><td style="background:#2271b1;padding:20px 32px;">'
-        f'<a href="{_esc(site_url)}" style="color:#ffffff;text-decoration:none;font-size:20px;font-weight:bold;">'
-        f'{_esc(site_name)}</a></td></tr>'
-        # Body
-        f'<tr><td style="padding:32px;color:#333333;font-size:15px;line-height:1.6;">'
-        f'<p style="white-space:pre-line;margin:0 0 16px;">{_esc(body_text)}</p>'
-        '</td></tr>'
-        # Footer
-        '<tr><td style="padding:16px 32px;border-top:1px solid #eee;color:#999999;font-size:12px;">'
-        '<p style="margin:0 0 8px;">Это автоматическое сообщение, не отвечайте на него.</p>'
+        f'<tr><td style="background:{_esc(brand_color)};padding:20px 32px;">',
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>',
+    ]
+
+    if logo_url:
+        parts.append('<td style="padding-right:12px;vertical-align:middle;">')
+        parts.append(f'<a href="{_esc(site_url)}" style="text-decoration:none;display:inline-block;">')
+        parts.append(
+            f'<img src="{_esc(logo_url)}" height="40" alt="{_esc(site_name)}" '
+            'style="display:block;border:0;max-height:40px;width:auto;">'
+        )
+        parts.append('</a></td>')
+
+    parts.append('<td style="vertical-align:middle;">')
+    parts.append(
+        f'<a href="{_esc(site_url)}" style="color:{_esc(text_color)};'
+        'text-decoration:none;font-size:20px;font-weight:bold;">'
     )
+    parts.append(f'{_esc(site_name)}</a></td>')
+    parts.append('</tr></table></td></tr>')
+
+    # Body
+    parts.append('<tr><td style="padding:32px;color:#333333;font-size:15px;line-height:1.6;">')
+    parts.append(f'<p style="white-space:pre-line;margin:0 0 16px;">{_esc(body_text)}</p>')
+
+    if signature:
+        parts.append(
+            '<p style="white-space:pre-line;margin:24px 0 0;color:#555555;font-size:14px;">'
+        )
+        parts.append(_nl2br(_esc(signature)))
+        parts.append('</p>')
+
+    parts.append('</td></tr>')
+
+    # Footer
+    parts.append('<tr><td style="padding:16px 32px;border-top:1px solid #eee;color:#999999;font-size:12px;">')
+    parts.append('<p style="margin:0 0 8px;">Это автоматическое сообщение, не отвечайте на него.</p>')
+
     if settings_link:
-        html += (
-            '<p style="margin:0;">'
-            f'<a href="{_esc(settings_link)}" style="color:#2271b1;text-decoration:underline;">'
+        parts.append('<p style="margin:0;">')
+        parts.append(
+            f'<a href="{_esc(settings_link)}" style="color:{_esc(brand_color)};text-decoration:underline;">'
             'Настроить уведомления</a></p>'
         )
-    html += '</td></tr></table></td></tr></table></body></html>'
-    return html
+
+    parts.append('</td></tr></table></td></tr></table></body></html>')
+    return "".join(parts)
 
 
 def _esc(s: str) -> str:
-    """Minimal HTML escaping."""
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    """Minimal HTML escaping (matches PHP esc_html / esc_attr / esc_url for our usage)."""
+    return _html_lib.escape(s, quote=True)
+
+
+def _nl2br(s: str) -> str:
+    """Mirror PHP nl2br: insert <br /> before each newline (text already escaped)."""
+    return s.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br />\n")
 
 
 # =====================================================================

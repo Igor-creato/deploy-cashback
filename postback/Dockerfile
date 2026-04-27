@@ -13,7 +13,8 @@ RUN pip install --no-cache-dir \
     jinja2==3.1.6 \
     python-multipart==0.0.26 \
     httptools==0.7.1 \
-    prometheus_client==0.25.0
+    prometheus_client==0.25.0 \
+    phpserialize==1.3
 
 COPY . .
 

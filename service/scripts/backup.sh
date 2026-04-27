@@ -11,7 +11,7 @@ STACK_DIR="$(dirname "$SCRIPT_DIR")"
 BACKUP_ROOT="/home/igor/backup"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 BACKUP_DIR="${BACKUP_ROOT}/${TIMESTAMP}"
-RETENTION_DAYS=7
+RETENTION_COUNT="${BACKUP_RETENTION_COUNT:-3}"
 
 # Textfile collector для node-exporter — алерт backup-stale смотрит сюда
 TEXTFILE_DIR="/var/lib/node_exporter/textfile_collector"
@@ -123,9 +123,20 @@ tar czf "${BACKUP_DIR}/configs.tar.gz" \
 echo "[OK] $(date): Конфигурации заархивированы"
 
 # ── Ротация старых бэкапов ──
-DELETED=$(find "${BACKUP_ROOT}" -maxdepth 1 -mindepth 1 -type d -mtime +${RETENTION_DAYS} -exec rm -rf {} \; -print | wc -l)
+# Оставляем только RETENTION_COUNT самых свежих timestamped-каталогов
+# (имя = YYYYMMDD_HHMMSS, сортируется лексикографически = хронологически).
+# Случайные файлы/папки иного формата (lost+found, ручные дампы) не трогаем.
+DELETED=0
+while IFS= read -r old; do
+  rm -rf "${BACKUP_ROOT:?}/${old}" && DELETED=$((DELETED + 1))
+done < <(
+  find "${BACKUP_ROOT}" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null \
+    | grep -E '^[0-9]{8}_[0-9]{6}$' \
+    | sort -r \
+    | tail -n +$((RETENTION_COUNT + 1))
+)
 if [[ "$DELETED" -gt 0 ]]; then
-  echo "[INFO] $(date): Удалено старых бэкапов: ${DELETED}"
+  echo "[INFO] $(date): Удалено старых бэкапов: ${DELETED} (оставлено ${RETENTION_COUNT})"
 fi
 
 # ── Итог ──
