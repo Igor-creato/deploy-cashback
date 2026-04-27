@@ -206,6 +206,9 @@ tar xzf "${BACKUP_DIR}/webhook-configs.tar.gz" -C "$WEBHOOK_DIR" --same-owner --
 ensure_env_var "${WEBHOOK_DIR}/.env" SMTP_ENV_FILE "${STACK_DIR}/.env"
 log "SMTP_ENV_FILE в ${WEBHOOK_DIR}/.env → ${STACK_DIR}/.env"
 
+ensure_env_var "${WEBHOOK_DIR}/.env" SMTP_PASSWORD_FILE_HOST "${STACK_DIR}/secrets/smtp_password.txt"
+log "SMTP_PASSWORD_FILE_HOST в ${WEBHOOK_DIR}/.env → ${STACK_DIR}/secrets/smtp_password.txt"
+
 # ─── 4. WordPress files (опционально) ───────────────────────
 if (( HAS_WP_FILES )); then
   WP_ROOT="${STACK_DIR}/volumes/wordpress"

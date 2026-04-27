@@ -94,6 +94,7 @@ services:
       - CONFIG_PATH=/data/config.json
       - WORKER_CONCURRENCY=4
       - TZ=UTC
+      - SMTP_PASSWORD_FILE=/run/secrets/smtp_password
     env_file:
       # SMTP settings + DOMAIN (shared with WordPress site).
       # Путь задаётся в .env через SMTP_ENV_FILE (install.sh спросит и пропишет).
@@ -101,6 +102,8 @@ services:
       # молча пропустит, не утекая чужой путь, если переменная не задана.
       - path: ${SMTP_ENV_FILE:-/var/empty/smtp-env-not-configured}
         required: false
+    secrets:
+      - smtp_password
     volumes:
       - app_data:/data
     command: python -m worker.processor
@@ -124,3 +127,10 @@ networks:
 
 volumes:
   app_data:
+
+secrets:
+  smtp_password:
+    # Путь задаётся в .env через SMTP_ENV_FILE_HOST (install.sh пропишет).
+    # Дефолт — заведомо несуществующий: worker не стартует с внятной ошибкой,
+    # вместо тихой отправки без авторизации.
+    file: ${SMTP_PASSWORD_FILE_HOST:-/var/empty/smtp-password-not-configured}

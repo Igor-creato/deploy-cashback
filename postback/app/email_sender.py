@@ -26,7 +26,23 @@ logger = logging.getLogger("webhook.email")
 SMTP_HOST = os.environ.get("SMTP_HOST", "")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
 SMTP_USER = os.environ.get("SMTP_USER", "")
-SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+
+
+def _read_smtp_password() -> str:
+    pw = os.environ.get("SMTP_PASSWORD", "")
+    if pw:
+        return pw
+    pw_file = os.environ.get("SMTP_PASSWORD_FILE", "")
+    if pw_file:
+        try:
+            with open(pw_file, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            logger.warning("SMTP_PASSWORD_FILE задан, но не читается: %s", pw_file)
+    return ""
+
+
+SMTP_PASSWORD = _read_smtp_password()
 # SMTP_SECURE=ssl → port 465 implicit SSL; SMTP_SECURE=tls → port 587 STARTTLS
 SMTP_SECURE = os.environ.get("SMTP_SECURE", "ssl").lower()
 

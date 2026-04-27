@@ -134,8 +134,20 @@ else
     done
 fi
 
+# SMTP-пароль лежит рядом с .env в secrets/smtp_password.txt — этот же файл
+# уже подключён как docker secret в service-стеке (Grafana/WordPress).
+# Если переменная пришла через preset (install-all.sh), используем её,
+# иначе вычисляем из SMTP_ENV_FILE.
+if [[ -z "${SMTP_PASSWORD_FILE_HOST:-}" ]]; then
+    SMTP_PASSWORD_FILE_HOST="$(dirname "$SMTP_ENV_FILE")/secrets/smtp_password.txt"
+fi
+
 if [[ ! -f "$SMTP_ENV_FILE" ]]; then
     warn "Файл $SMTP_ENV_FILE не найден — worker запустится без SMTP, email-уведомления работать не будут"
+fi
+
+if [[ ! -f "$SMTP_PASSWORD_FILE_HOST" ]]; then
+    warn "Файл $SMTP_PASSWORD_FILE_HOST не найден — direct-SMTP в worker'е не пройдёт авторизацию (письма пойдут через WP-крон fallback)"
 fi
 
 # ─── 4. Generate admin password ──────────────────────────────────────────────
@@ -153,6 +165,7 @@ cat > .env <<EOF
 ADMIN_SECRET=$ADMIN_SECRET
 WEBHOOK_DOMAIN=$WEBHOOK_DOMAIN
 SMTP_ENV_FILE=$SMTP_ENV_FILE
+SMTP_PASSWORD_FILE_HOST=$SMTP_PASSWORD_FILE_HOST
 TZ=UTC
 EOF
 chmod 600 .env
@@ -232,6 +245,7 @@ cat <<EOF
 
   Домен вебхуков:  ${WEBHOOK_DOMAIN}
   SMTP env file:   ${SMTP_ENV_FILE}
+  SMTP пароль:     ${SMTP_PASSWORD_FILE_HOST}
 
   ${CYN}Доступ к админке${NC} (через SSH-туннель):
     ssh -L 8098:localhost:8098 user@${HOSTNAME_HINT}

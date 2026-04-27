@@ -138,9 +138,12 @@ info "═══ установка stack: ${STACK_DIR} ═══"
 wait_healthy mariadb redis || { err "stack не вышел в healthy — не запускаю webhook-receiver"; exit 1; }
 
 # ─── 4. Установка webhook-receiver ──────────────────────────
-# SMTP_ENV_FILE через env-var: install.sh видит preset → не задаёт вопрос.
+# SMTP_ENV_FILE / SMTP_PASSWORD_FILE_HOST через env-var: install.sh видит preset → не задаёт вопрос.
 info "═══ установка webhook-receiver: ${WEBHOOK_DIR} ═══"
-( cd "$WEBHOOK_DIR" && SMTP_ENV_FILE="${STACK_DIR}/.env" bash install.sh )
+( cd "$WEBHOOK_DIR" \
+  && SMTP_ENV_FILE="${STACK_DIR}/.env" \
+     SMTP_PASSWORD_FILE_HOST="${STACK_DIR}/secrets/smtp_password.txt" \
+     bash install.sh )
 
 echo
 log "оба стека установлены и запущены"
