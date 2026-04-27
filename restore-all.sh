@@ -197,6 +197,18 @@ info "распаковка stack-configs.tar.gz → ${STACK_DIR}/"
 mkdir -p "$STACK_DIR"
 tar xzf "${BACKUP_DIR}/stack-configs.tar.gz" -C "$STACK_DIR" --same-owner --same-permissions
 
+# ─── 2a. Проверка устаревшего FastCGI cache bypass ──────────
+# В старых бэкапах nginx.conf содержал bypass на 'wp_woocommerce_session_*',
+# из-за чего гостям вообще не отдавался кэш (WC ставит эту cookie любому).
+# Авто-правкой не лезем — конфиг могут править вручную; просто предупреждаем.
+NGINX_CONF="${STACK_DIR}/volumes/nginx/nginx.conf"
+if [[ -f "$NGINX_CONF" ]] && grep -q 'wp_woocommerce_session_' "$NGINX_CONF"; then
+  warn "В восстановленном nginx.conf найдено правило bypass на 'wp_woocommerce_session_'"
+  warn "  — это старая конфигурация: гостям FastCGI cache отдаваться не будет."
+  warn "Удали эту строку из ${NGINX_CONF} (блок 'map \$http_cookie \$skip_cache_cookie')"
+  warn "и выполни:  docker exec nginx nginx -t && docker exec nginx nginx -s reload"
+fi
+
 # ─── 3. Конфиги webhook ─────────────────────────────────────
 info "распаковка webhook-configs.tar.gz → ${WEBHOOK_DIR}/"
 mkdir -p "$WEBHOOK_DIR"
@@ -331,6 +343,41 @@ fi
 # ─── 10. Поднимаем webhook ──────────────────────────────────
 info "стартую webhook-receiver"
 dc_webhook up -d
+
+# ─── 11. Redis Object Cache: переразвернуть drop-in ─────────
+# Бэкап мог быть сделан на образе без расширения redis (использовался Predis).
+# Новый образ в репозитории его уже содержит. wp redis update-dropin
+# безопасно перезаписывает wp-content/object-cache.php актуальной версией
+# из плагина — в новом окружении он сам выберет нативный PhpRedis.
+if docker ps --format '{{.Names}}' | grep -qx wordpress; then
+  WP_RUN="docker exec -u www-data wordpress wp --allow-root"
+  # Дать WordPress'у пару секунд после старта — иначе wp-cli может упасть с
+  # 'WordPress database error' на свежесмонтированных файлах.
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if $WP_RUN core is-installed >/dev/null 2>&1; then break; fi
+    sleep 2
+  done
+
+  if $WP_RUN core is-installed >/dev/null 2>&1; then
+    if $WP_RUN plugin is-active redis-cache >/dev/null 2>&1; then
+      $WP_RUN redis update-dropin >/dev/null 2>&1 \
+        || $WP_RUN redis enable >/dev/null 2>&1 \
+        || warn "не удалось обновить object-cache drop-in; запусти вручную: $WP_RUN redis enable"
+      CLIENT_LINE="$($WP_RUN redis status 2>/dev/null | grep -E '^Client:' || true)"
+      if echo "$CLIENT_LINE" | grep -qi 'PhpRedis'; then
+        log "Redis Object Cache: ${CLIENT_LINE#Client:}"
+      else
+        warn "Redis Object Cache использует НЕ PhpRedis: ${CLIENT_LINE:-неизвестно}"
+        warn "Проверь, что образ собран с PECL redis: docker exec wordpress php -m | grep redis"
+      fi
+    else
+      info "плагин redis-cache не активен — пропускаю update-dropin (запусти scripts/finalize-wordpress.sh)"
+    fi
+  else
+    warn "WordPress не успел стартовать или не установлен — пропускаю update-dropin"
+    warn "После того как стек прогреется, выполни: bash ${STACK_DIR}/scripts/finalize-wordpress.sh"
+  fi
+fi
 
 echo
 log "восстановление завершено"

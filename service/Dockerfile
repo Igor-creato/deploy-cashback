@@ -26,6 +26,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     less \
     && rm -rf /var/lib/apt/lists/*
 
+# ── PhpRedis (нативный клиент Redis) ──
+# Без него Redis Object Cache откатывается на Predis (PHP-эмуляция протокола),
+# что даёт ×5–×10 латентность на каждое обращение к Redis. На WooCommerce
+# критично: десятки тысяч ops/req. Версия 6.2.0 — последний стабильный
+# релиз, совместимый с PHP 8.4. $PHPIZE_DEPS ставим временно и удаляем
+# после сборки расширения, чтобы не раздувать финальный образ.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends $PHPIZE_DEPS; \
+    pecl install redis-6.2.0; \
+    docker-php-ext-enable redis; \
+    apt-get purge -y --auto-remove $PHPIZE_DEPS; \
+    rm -rf /var/lib/apt/lists/* /tmp/pear
+
 # ── WP-CLI (для host-cron и администрирования) ──
 RUN curl -fsSL -o /usr/local/bin/wp \
       https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
