@@ -357,7 +357,7 @@ groups:
             relativeTimeRange: { from: 1200, to: 0 }
             datasourceUid: victoriametrics-uid
             model:
-              expr: time() - webhook_last_processed_ts
+              expr: (time() - webhook_last_processed_ts) and (webhook_queue_size > 0)
               instant: true
           - refId: C
             datasourceUid: '__expr__'
@@ -370,7 +370,7 @@ groups:
         for: 1m
         labels: { severity: critical }
         annotations:
-          summary: 'Worker не обработал ни одного сообщения >10 минут'
+          summary: 'Worker не обрабатывает очередь: есть сообщения, но >10 минут без прогресса'
 
       - uid: backup-stale
         title: 'Backup older than 26h'
