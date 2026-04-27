@@ -223,6 +223,15 @@ if (( HAS_WP_FILES )); then
     info "распаковка wp-content.tar.gz → ${WP_ROOT}/"
   fi
   tar xzf "$WP_ARCHIVE" -C "$WP_ROOT" --same-owner --same-permissions
+
+  # Стандартный tar не сохраняет POSIX ACL — переприменяем после распаковки.
+  if [[ -x "${STACK_DIR}/scripts/fix-wp-perms.sh" ]]; then
+    info "переприменение прав и ACL на ${WP_ROOT} (fix-wp-perms.sh)"
+    REAL_USER_OVERRIDE="${SUDO_USER:-root}" \
+      bash "${STACK_DIR}/scripts/fix-wp-perms.sh" "${WP_ROOT}"
+  else
+    warn "${STACK_DIR}/scripts/fix-wp-perms.sh не найден — ACL не переприменены"
+  fi
 fi
 
 # ─── 5. Пересоздание webhook volume ─────────────────────────

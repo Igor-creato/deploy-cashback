@@ -277,16 +277,21 @@ fi
 
 # ─── Права на volumes ─────────────────────────────────────
 # nginx: uid=101/gid=101 в alpine
-# wordpress/php-fpm: uid=33/gid=33 (www-data)
+# wordpress/php-fpm: uid=33/gid=33 (www-data) — настраивается в fix-wp-perms.sh
 # mariadb: uid=999/gid=999
-chown -R 33:33  "$INSTALL_DIR/volumes/wordpress"
 chown -R 999:999 "$INSTALL_DIR/volumes/mariadb"
 chown -R 101:101 "$INSTALL_DIR/volumes/nginx-logs"
 chown -R 101:101 "$INSTALL_DIR/volumes/modsec-logs"
-chmod 755 "$INSTALL_DIR/volumes/wordpress"
 chmod 755 "$INSTALL_DIR/volumes/mariadb"
 chmod 755 "$INSTALL_DIR/volumes/nginx-logs"
 chmod 755 "$INSTALL_DIR/volumes/modsec-logs"
+
+# Права на wordpress + ACL для REAL_USER (см. service/scripts/fix-wp-perms.sh).
+# Скрипт оставляет владельца www-data:www-data и через POSIX ACL даёт REAL_USER
+# rwx на wp-content/ — так администратор хоста может писать туда без sudo,
+# не ломая работу контейнера. Соответствует WordPress Hardening Guide.
+chmod +x "$INSTALL_DIR/scripts/fix-wp-perms.sh" 2>/dev/null || true
+bash "$INSTALL_DIR/scripts/fix-wp-perms.sh" "$INSTALL_DIR/volumes/wordpress"
 
 log "Права на volumes установлены"
 
@@ -311,7 +316,8 @@ chmod +x "$INSTALL_DIR/scripts/backup.sh" 2>/dev/null || true
 chmod +x "$INSTALL_DIR/scripts/setup-cron.sh" 2>/dev/null || true
 chmod +x "$INSTALL_DIR/scripts/setup-mariadb-users.sh" 2>/dev/null || true
 chmod +x "$INSTALL_DIR/scripts/install-dashboards.sh" 2>/dev/null || true
-log "backup.sh, setup-cron.sh, setup-mariadb-users.sh, install-dashboards.sh готовы"
+chmod +x "$INSTALL_DIR/scripts/fix-wp-perms.sh" 2>/dev/null || true
+log "backup.sh, setup-cron.sh, setup-mariadb-users.sh, install-dashboards.sh, fix-wp-perms.sh готовы"
 
 # ─── Системные лимиты ────────────────────────────────────
 info "Настройка системных лимитов..."
