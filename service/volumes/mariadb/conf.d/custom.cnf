@@ -70,6 +70,9 @@ binlog_expire_logs_seconds = 604800
 binlog_format = ROW
 sync_binlog = 0
 max_binlog_size = 256M
+# Required so cashback_user (no SUPER) can CREATE TRIGGER while log_bin=ON.
+# Без этого Mariadb_Plugin::create_triggers() падает на активации плагина.
+log_bin_trust_function_creators = ON
 
 # ── Scheduler ──
 event_scheduler = ON
