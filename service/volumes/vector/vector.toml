@@ -116,7 +116,8 @@ if exists(.transaction.request.body) {
 }
 if exists(.transaction.request.uri) {
   .transaction.request.uri = replace(to_string(.transaction.request.uri) ?? "", uri_re, "$$1***REDACTED***")
-  .transaction.request.uri = replace(to_string(.transaction.request.uri) ?? "", path_secret_re, "$$1***REDACTED***")
+  # после первого replace переменная уже гарантированно string, to_string + ?? "" лишние
+  .transaction.request.uri = replace(.transaction.request.uri, path_secret_re, "$$1***REDACTED***")
 }
 if exists(.transaction.request.headers."Authorization") {
   .transaction.request.headers."Authorization" = "***REDACTED***"
@@ -156,18 +157,19 @@ uri_re = r'([?&](?:token|api[_-]?key|key|secret|auth|pwd|password|access[_-]?tok
 path_secret_re = r'^(/[a-z0-9][a-z0-9_-]{0,62}/)[A-Za-z0-9_-]{20,}'
 if exists(.RequestPath) {
   .RequestPath = replace(to_string(.RequestPath) ?? "", uri_re, "$$1***REDACTED***")
-  .RequestPath = replace(to_string(.RequestPath) ?? "", path_secret_re, "$$1***REDACTED***")
+  # после первого replace переменная уже string — to_string + ?? "" лишние (E651)
+  .RequestPath = replace(.RequestPath, path_secret_re, "$$1***REDACTED***")
 }
 if exists(.RequestAddr) {
   .RequestAddr = replace(to_string(.RequestAddr) ?? "", uri_re, "$$1***REDACTED***")
 }
 if exists(."request_Referer") {
   ."request_Referer" = replace(to_string(."request_Referer") ?? "", uri_re, "$$1***REDACTED***")
-  ."request_Referer" = replace(to_string(."request_Referer") ?? "", path_secret_re, "$$1***REDACTED***")
+  ."request_Referer" = replace(."request_Referer", path_secret_re, "$$1***REDACTED***")
 }
 if exists(.message) {
   .message = replace(to_string(.message) ?? "", uri_re, "$$1***REDACTED***")
-  .message = replace(to_string(.message) ?? "", path_secret_re, "$$1***REDACTED***")
+  .message = replace(.message, path_secret_re, "$$1***REDACTED***")
 }
 .source_type = "traefik_access"
 .service = "traefik"
