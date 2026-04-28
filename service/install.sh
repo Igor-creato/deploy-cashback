@@ -245,18 +245,22 @@ else
 fi
 
 chmod 700 "$INSTALL_DIR/secrets"
-# Compose v2 (без Swarm) bind-mount'ит файлы секретов в /run/secrets/<name>;
-# контейнерные процессы читают через mount, а не через прямые file perms на хосте,
-# поэтому 600 root:root работает (проверено на mariadb / wordpress / grafana).
-# Это критично: 644 позволил бы любому локальному не-root user'у на хосте
-# прочесть db_root_password.txt напрямую (директорный 700 не защищает, если
-# полное имя файла известно — а имена секретов перечислены в compose).
-chmod 600 "$INSTALL_DIR/secrets/"*.txt
-# mysql_exporter.cnf — 644: контейнер mysqld-exporter работает от 'nobody',
-# поэтому 600 root:root → permission denied при чтении /run/secrets/mysql_exporter_my_cnf.
-# Защита всё равно на месте: dir secrets/ — 700 igor:igor, посторонние внутрь не зайдут.
+# Compose v2 (без Swarm) bind-mount'ит файлы секретов в /run/secrets/<name>
+# с теми же mode и ownership, что у файла на хосте.
+#
+# Многие контейнеры запускают service от непривилегированного пользователя:
+#   - wordpress (php-fpm worker) → www-data (uid 33), читает wp-config.php
+#     с file_get_contents('/run/secrets/db_password') в каждом запросе
+#   - mysqld-exporter → nobody, читает /run/secrets/mysql_exporter_my_cnf
+#   - grafana → grafana, GF_SECURITY_ADMIN_PASSWORD__FILE
+#   - postback receiver/admin/worker → root (но потенциально могут drop)
+#
+# Поэтому ставим 644 (world-readable in container). Защита от других
+# пользователей хоста — через mode 700 на саму директорию secrets/ (никто
+# кроме owner'а не зайдёт внутрь, имя файла не помогает обойти).
+chmod 644 "$INSTALL_DIR/secrets/"*.txt
 chmod 644 "$INSTALL_DIR/secrets/mysql_exporter.cnf"
-log "Docker secrets созданы (dir 0700, *.txt=0600, mysql_exporter.cnf=0644)"
+log "Docker secrets созданы (dir 0700, files 0644 — защита через директорию)"
 
 # ─── Traefik acme.json ────────────────────────────────────
 touch "$INSTALL_DIR/volumes/traefik/acme.json"
