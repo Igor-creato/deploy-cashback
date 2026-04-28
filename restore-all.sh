@@ -297,7 +297,8 @@ if [[ ! -f "$EXPORTER_CNF" ]]; then
 user=exporter
 password=${MYSQL_EXPORTER_PASSWORD}
 EOF
-    chmod 600 "$EXPORTER_CNF"
+    # mode 644: mysqld-exporter container запускается от 'nobody', 600 даёт permission denied.
+    chmod 644 "$EXPORTER_CNF"
     log "сгенерирован secrets/mysql_exporter.cnf из .env (миграция со старого бэкапа)"
   else
     err "secrets/mysql_exporter.cnf отсутствует и MYSQL_EXPORTER_PASSWORD не задан в .env"

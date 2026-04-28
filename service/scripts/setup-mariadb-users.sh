@@ -29,7 +29,9 @@ if [[ ! -f "$EXPORTER_CNF" ]]; then
 user=exporter
 password=${MYSQL_EXPORTER_PASSWORD}
 EOF
-    chmod 600 "$EXPORTER_CNF"
+    # mode 644: mysqld-exporter container runs as 'nobody', не сможет читать 600.
+    # Защита через директорию secrets/ (mode 700).
+    chmod 644 "$EXPORTER_CNF"
     echo "[INFO] сгенерирован ${EXPORTER_CNF} из .env (миграция со старого бэкапа)"
   else
     echo "[ERROR] не найден ${EXPORTER_CNF} и MYSQL_EXPORTER_PASSWORD в .env"
@@ -70,7 +72,8 @@ ALTER USER 'exporter'@'%' IDENTIFIED BY '${MYSQL_EXPORTER_PASSWORD}';
 REVOKE ALL PRIVILEGES, GRANT OPTION FROM 'exporter'@'%';
 GRANT PROCESS, REPLICATION CLIENT, SLAVE MONITOR ON *.* TO 'exporter'@'%';
 GRANT SELECT ON performance_schema.* TO 'exporter'@'%';
-GRANT SELECT ON information_schema.* TO 'exporter'@'%';
+-- information_schema автоматически доступен любому пользователю как read-only;
+-- явный GRANT даже от root возвращает ERROR 1044 ("Access denied to db info_schema").
 FLUSH PRIVILEGES;
 SQL
 

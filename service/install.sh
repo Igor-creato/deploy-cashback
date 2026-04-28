@@ -252,8 +252,11 @@ chmod 700 "$INSTALL_DIR/secrets"
 # прочесть db_root_password.txt напрямую (директорный 700 не защищает, если
 # полное имя файла известно — а имена секретов перечислены в compose).
 chmod 600 "$INSTALL_DIR/secrets/"*.txt
-chmod 600 "$INSTALL_DIR/secrets/mysql_exporter.cnf"
-log "Docker secrets созданы (dir 0700, files 0600)"
+# mysql_exporter.cnf — 644: контейнер mysqld-exporter работает от 'nobody',
+# поэтому 600 root:root → permission denied при чтении /run/secrets/mysql_exporter_my_cnf.
+# Защита всё равно на месте: dir secrets/ — 700 igor:igor, посторонние внутрь не зайдут.
+chmod 644 "$INSTALL_DIR/secrets/mysql_exporter.cnf"
+log "Docker secrets созданы (dir 0700, *.txt=0600, mysql_exporter.cnf=0644)"
 
 # ─── Traefik acme.json ────────────────────────────────────
 touch "$INSTALL_DIR/volumes/traefik/acme.json"
