@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ═══════════════════════════════════════════════════════════
-#  Чистит таблицу cashback_webhooks от успешно обработанных
+#  Чистит таблицу <prefix>cashback_webhooks от успешно обработанных
 #  записей старше 30 дней. Выполняется батчами LIMIT 5000,
 #  пока есть что удалять — backlog после downtime тоже подчистится.
 #  Failed/error-записи оставляем для форензики и ручного re-process'а.
@@ -33,6 +33,11 @@ if [[ -f "${STACK_DIR}/.env" ]]; then
   [[ -n "$v" ]] && DB_USER="$v"
 fi
 
+# Таблица называется <prefix>cashback_webhooks. WP-стандарт: prefix="wp_".
+# Если кастомный префикс — переопределить через env CASHBACK_TABLE_PREFIX.
+TABLE_PREFIX="${CASHBACK_TABLE_PREFIX:-wp_}"
+TABLE="${TABLE_PREFIX}cashback_webhooks"
+
 BATCH=5000
 MAX_BATCHES=20  # safety limit: до 100k строк за один запуск
 total=0
@@ -42,7 +47,7 @@ for ((i=1; i<=MAX_BATCHES; i++)); do
   # Передаём пароль через MYSQL_PWD (не argv) и SQL через stdin (не -e).
   rows=$(docker exec -i -e MYSQL_PWD="$(cat "$SECRET_FILE")" \
     mariadb mariadb -u "$DB_USER" -N -B "$DB_NAME" <<SQL 2>&1
-DELETE FROM cashback_webhooks
+DELETE FROM ${TABLE}
 WHERE received_at < NOW() - INTERVAL 30 DAY
   AND processing_status = 'ok'
 LIMIT ${BATCH};
@@ -61,4 +66,4 @@ SQL
   fi
 done
 
-echo "[OK] $(date '+%F %T'): cleanup-webhooks: удалено ${total} строк за ${i} батчей"
+echo "[OK] $(date '+%F %T'): cleanup-webhooks: удалено ${total} строк (${TABLE}) за ${i} батчей"
