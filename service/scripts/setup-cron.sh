@@ -147,6 +147,12 @@ fi
 # ─── Сборка нового crontab ───────────────────────────────
 CRON_AS="* * * * * ${FLOCK_BIN} -n ${LOCK_DIR}/cashback-as.lock -c 'docker exec -u www-data wordpress wp action-scheduler run --batch-size=50 --batches=1 --group=cashback --quiet' >> ${LOG_DIR}/action-scheduler.log 2>&1"
 CRON_WP="*/5 * * * * ${FLOCK_BIN} -n ${LOCK_DIR}/cashback-wpcron.lock -c 'docker exec -u www-data wordpress wp cron event run --due-now --quiet' >> ${LOG_DIR}/wp-cron.log 2>&1"
+# Очистка отработавших actions: complete > 1 день, failed/canceled > 7 дней.
+# Разнесены по минутам, чтобы не пересекаться по shared-lock; запускаются ночью,
+# когда нагрузка минимальна. logrotate подхватит as-clean.log по glob *.log.
+CRON_AS_CLEAN_COMPLETE="17 3 * * * ${FLOCK_BIN} -n ${LOCK_DIR}/cashback-as-clean.lock -c 'docker exec -u www-data wordpress wp action-scheduler clean --status=complete --before=\"1 day ago\" --batch-size=1000 --quiet' >> ${LOG_DIR}/as-clean.log 2>&1"
+CRON_AS_CLEAN_FAILED="22 3 * * * ${FLOCK_BIN} -n ${LOCK_DIR}/cashback-as-clean.lock -c 'docker exec -u www-data wordpress wp action-scheduler clean --status=failed --before=\"7 days ago\" --batch-size=1000 --quiet' >> ${LOG_DIR}/as-clean.log 2>&1"
+CRON_AS_CLEAN_CANCELED="27 3 * * * ${FLOCK_BIN} -n ${LOCK_DIR}/cashback-as-clean.lock -c 'docker exec -u www-data wordpress wp action-scheduler clean --status=canceled --before=\"7 days ago\" --batch-size=1000 --quiet' >> ${LOG_DIR}/as-clean.log 2>&1"
 # Бэкап-задача указывает на единый скрипт верхнего уровня (stack + webhook-receiver).
 # Если umbrella ещё не развёрнут, fallback на старый stack-only backup.sh.
 # Ротация (оставлять N последних бэкапов) — внутри backup-all.sh / backup.sh,
@@ -203,8 +209,9 @@ rebuild_crontab() {
 # backup-all.sh читает wp-content (owned by www-data uid 33) и
 # secrets/ (mode 600 root) → должен идти из root crontab, иначе
 # tar упадёт на permission denied и бэкап будет неполным.
-rebuild_crontab "$REAL_USER" "$CRON_AS" "$CRON_WP"
-log "Crontab ${REAL_USER}: AS + wp-cron"
+rebuild_crontab "$REAL_USER" "$CRON_AS" "$CRON_WP" \
+  "$CRON_AS_CLEAN_COMPLETE" "$CRON_AS_CLEAN_FAILED" "$CRON_AS_CLEAN_CANCELED"
+log "Crontab ${REAL_USER}: AS run + AS clean + wp-cron"
 
 rebuild_crontab "root" "$CRON_BACKUP"
 log "Crontab root: backup-all.sh каждые 6 часов"
@@ -222,5 +229,6 @@ log "Готово."
 echo ""
 info "Проверка:"
 echo "    tail -f ${LOG_DIR}/action-scheduler.log"
+echo "    tail -f ${LOG_DIR}/as-clean.log"
 echo "    docker exec -u www-data wordpress wp action-scheduler list --status=pending --group=cashback"
 echo "    logrotate -d ${LOGROTATE_CONF}"
