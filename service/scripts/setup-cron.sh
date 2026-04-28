@@ -124,9 +124,60 @@ LOGROTATE
 chmod 644 "$LOGROTATE_CONF"
 log "logrotate настроен: ${LOGROTATE_CONF}"
 
+# ─── logrotate для bind-mount логов контейнеров ──────────
+# ModSec audit (Serial), nginx access/error, php-fpm slowlog лежат в bind-mount'ах.
+# Без этой секции файлы росли бы бесконечно: контейнеры на alpine не имеют logrotate,
+# а ModSec пишет в один файл через MODSEC_AUDIT_LOG_TYPE=Serial.
+# copytruncate — обязательно: процессы держат FD открытым; renameat() их не уведомит.
+LOGROTATE_STACK="/etc/logrotate.d/cashback-stack"
+cat > "$LOGROTATE_STACK" <<LOGROTATE
+${INSTALL_DIR}/volumes/modsec-logs/*.log
+${INSTALL_DIR}/volumes/nginx-logs/*.log
+{
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    size 100M
+    dateext
+    dateformat -%Y%m%d
+}
+LOGROTATE
+chmod 644 "$LOGROTATE_STACK"
+log "logrotate bind-mount логов: ${LOGROTATE_STACK}"
+
 # Проверка синтаксиса logrotate
 if ! logrotate -d "$LOGROTATE_CONF" &>/dev/null; then
   warn "logrotate -d вернул ошибку — проверьте вручную: logrotate -d ${LOGROTATE_CONF}"
+fi
+if ! logrotate -d "$LOGROTATE_STACK" &>/dev/null; then
+  warn "logrotate -d ${LOGROTATE_STACK} вернул ошибку — проверьте вручную"
+fi
+
+# ─── journald ограничения ───────────────────────────────
+# По умолчанию systemd-journald заполняет до 10% диска. На небольшом VPS это
+# становится крупнейшим потребителем места после modsec_audit. Жёстко ограничиваем.
+JOURNALD_CONF_DIR="/etc/systemd/journald.conf.d"
+JOURNALD_CONF="${JOURNALD_CONF_DIR}/cashback.conf"
+mkdir -p "$JOURNALD_CONF_DIR"
+if [[ ! -f "$JOURNALD_CONF" ]] || ! grep -q 'cashback-stack' "$JOURNALD_CONF" 2>/dev/null; then
+  cat > "$JOURNALD_CONF" <<EOF
+# cashback-stack: managed by setup-cron.sh
+[Journal]
+SystemMaxUse=500M
+SystemKeepFree=1G
+MaxRetentionSec=14day
+EOF
+  chmod 644 "$JOURNALD_CONF"
+  if systemctl is-system-running &>/dev/null; then
+    systemctl restart systemd-journald 2>/dev/null || true
+  fi
+  log "journald лимиты: SystemMaxUse=500M, MaxRetentionSec=14d"
+else
+  info "journald конфиг уже есть: ${JOURNALD_CONF}"
 fi
 
 # ─── WP-CLI sanity check (warning, не fatal) ─────────────
@@ -153,6 +204,15 @@ CRON_WP="*/5 * * * * ${FLOCK_BIN} -n ${LOCK_DIR}/cashback-wpcron.lock -c 'docker
 CRON_AS_CLEAN_COMPLETE="17 3 * * * ${FLOCK_BIN} -n ${LOCK_DIR}/cashback-as-clean.lock -c 'docker exec -u www-data wordpress wp action-scheduler clean --status=complete --before=\"1 day ago\" --batch-size=1000 --quiet' >> ${LOG_DIR}/as-clean.log 2>&1"
 CRON_AS_CLEAN_FAILED="22 3 * * * ${FLOCK_BIN} -n ${LOCK_DIR}/cashback-as-clean.lock -c 'docker exec -u www-data wordpress wp action-scheduler clean --status=failed --before=\"7 days ago\" --batch-size=1000 --quiet' >> ${LOG_DIR}/as-clean.log 2>&1"
 CRON_AS_CLEAN_CANCELED="27 3 * * * ${FLOCK_BIN} -n ${LOCK_DIR}/cashback-as-clean.lock -c 'docker exec -u www-data wordpress wp action-scheduler clean --status=canceled --before=\"7 days ago\" --batch-size=1000 --quiet' >> ${LOG_DIR}/as-clean.log 2>&1"
+# Чистка таблицы cashback_webhooks через отдельный скрипт (cleanup-webhooks.sh).
+# Скрипт делает batched DELETE с циклом — обрабатывает любой backlog без шанса
+# отстать. failed/error-записи оставляем для форензики и ручного re-process'а.
+# Запускается от root, чтобы читать secrets/db_password.txt напрямую.
+CRON_WH_CLEAN="33 4 * * * ${FLOCK_BIN} -n ${LOCK_DIR}/cashback-wh-clean.lock -c '${INSTALL_DIR}/scripts/cleanup-webhooks.sh' >> ${LOG_DIR}/wh-clean.log 2>&1"
+# Truncate Traefik access.log в named volume, если он перевалил 100 MB.
+# Named volume не виден logrotate'у на хосте, поэтому очистка делается через
+# `truncate` из контейнера (sidecar busybox запускается одной командой).
+CRON_TRAEFIK_TRUNCATE="30 4 * * * docker run --rm -v service_traefik_logs:/logs busybox sh -c 'find /logs -name \"*.log\" -size +100M -exec truncate -s 0 {} +' 2>&1 | logger -t cashback-traefik-trunc"
 # Бэкап-задача указывает на единый скрипт верхнего уровня (stack + webhook-receiver).
 # Если umbrella ещё не развёрнут, fallback на старый stack-only backup.sh.
 # Ротация (оставлять N последних бэкапов) — внутри backup-all.sh / backup.sh,
@@ -213,8 +273,10 @@ rebuild_crontab "$REAL_USER" "$CRON_AS" "$CRON_WP" \
   "$CRON_AS_CLEAN_COMPLETE" "$CRON_AS_CLEAN_FAILED" "$CRON_AS_CLEAN_CANCELED"
 log "Crontab ${REAL_USER}: AS run + AS clean + wp-cron"
 
-rebuild_crontab "root" "$CRON_BACKUP"
-log "Crontab root: backup-all.sh каждые 6 часов"
+# root: backup-all.sh + cashback_webhooks cleanup + truncate Traefik logs.
+# wh-clean и traefik-truncate требуют чтения secrets/ (mode 600) и docker socket — оба под root.
+rebuild_crontab "root" "$CRON_BACKUP" "$CRON_WH_CLEAN" "$CRON_TRAEFIK_TRUNCATE"
+log "Crontab root: backup-all.sh + cashback_webhooks cleanup + traefik logs truncate"
 
 # ─── Показать итог ───────────────────────────────────────
 echo ""

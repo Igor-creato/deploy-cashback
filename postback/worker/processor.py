@@ -39,6 +39,14 @@ logger = logging.getLogger("webhook.worker")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 QUEUE_KEY = "webhook:queue"
 DLQ_KEY = "webhook:dlq"  # dead letter queue
+DLQ_MAX_LEN = 9999
+
+# Чувствительные поля webhook payload'а — маскируем перед записью в DLQ,
+# т.к. DLQ хранится в Redis и читается через redis-exporter / docker exec.
+_DLQ_SENSITIVE_FIELDS = frozenset((
+    "user_id", "partner_token", "subid", "subid2", "subid3",
+    "click_id", "email", "phone", "ip",
+))
 CONCURRENCY = int(os.environ.get("WORKER_CONCURRENCY", "4"))
 METRICS_PORT = int(os.environ.get("METRICS_PORT", "9100"))
 SHUTDOWN = threading.Event()
@@ -57,6 +65,27 @@ PROCESSED_TOTAL = Counter(
 
 def get_redis_conn() -> redis.Redis:
     return redis.from_url(REDIS_URL, decode_responses=True)
+
+
+def _sanitize_for_dlq(raw_message: str) -> str:
+    """Замаскировать чувствительные поля payload'а перед записью в DLQ.
+    Если payload не парсится — возвращаем placeholder без оригинала."""
+    try:
+        msg = json.loads(raw_message)
+    except (json.JSONDecodeError, ValueError):
+        return json.dumps({"_dlq_note": "non-json payload dropped",
+                           "_size": len(raw_message),
+                           "_received_at": time.time()})
+    params = msg.get("params") or {}
+    if isinstance(params, dict):
+        masked: dict[str, Any] = {}
+        for k, v in params.items():
+            if k.lower() in _DLQ_SENSITIVE_FIELDS:
+                masked[k] = "***"
+            else:
+                masked[k] = v
+        msg["params"] = masked
+    return json.dumps(msg, ensure_ascii=False, default=str)
 
 
 def apply_mapping(params: dict[str, Any], mapping: dict[str, str]) -> dict[str, Any]:
@@ -242,9 +271,12 @@ def process_message(raw_message: str) -> None:
     ok, reason, insert_id = insert_transaction(mapped, registered)
     if ok:
         target = "cashback_transactions" if registered else "cashback_unregistered_transactions"
+        # Не светим numeric user_id в info-логе: иначе docker logs webhook-worker
+        # построит таблицу user_id ↔ partner ↔ purchase history. user_id всё равно
+        # доступен через webhook_id ↔ cashback_transactions для админа в БД.
         logger.info(
-            "Inserted into %s: user=%s, uniq=%s, partner=%s, status=%s",
-            target, user_id, uniq_id, mapped["partner_name"], mapped["order_status"],
+            "Inserted into %s: webhook=%s, uniq=%s, partner=%s, status=%s",
+            target, webhook_id, uniq_id, mapped["partner_name"], mapped["order_status"],
         )
 
         # Email notification for registered users
@@ -291,10 +323,11 @@ def worker_loop(worker_id: int) -> None:
             except Exception:
                 logger.exception("Error processing message")
                 PROCESSED_TOTAL.labels(result="error").inc()
-                # Push to dead letter queue
+                # Push to dead letter queue (sanitized — без user_id/partner_token).
+                # lpush + ltrim 0..DLQ_MAX_LEN: новые сообщения в head, обрезаются хвостом.
                 try:
-                    r.lpush(DLQ_KEY, raw_message)
-                    r.ltrim(DLQ_KEY, 0, 9999)  # keep max 10k in DLQ
+                    r.lpush(DLQ_KEY, _sanitize_for_dlq(raw_message))
+                    r.ltrim(DLQ_KEY, 0, DLQ_MAX_LEN)
                 except Exception:
                     pass
 

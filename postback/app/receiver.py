@@ -3,12 +3,16 @@ Webhook Receiver.
 Accepts GET/POST on /{slug}/{secret}.
 Immediately pushes raw data to Redis queue and returns 200.
 """
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
 import re
 import time
 from typing import Any
+from urllib.parse import parse_qsl
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI, Request
@@ -23,7 +27,9 @@ logger = logging.getLogger("webhook.receiver")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 QUEUE_KEY = "webhook:queue"
 RATE_LIMIT_PREFIX = "webhook:rl:"
-MAX_PAYLOAD_BYTES = 512 * 1024  # 512 KB
+# Реальные постбэки CPA-сетей < 4 KB; 16 KB — щедрый запас. Защита от DoS:
+# attacker не может слить event loop чтением мегабайтного тела.
+MAX_PAYLOAD_BYTES = 16 * 1024
 
 # Lua script: atomic INCR + EXPIRE (only sets TTL on first request)
 _RL_LUA = """
@@ -85,6 +91,71 @@ def _is_safe_slug(s: str) -> bool:
     return bool(s and _SLUG_RE.match(s))
 
 
+_HMAC_DIGEST_MODS = {
+    "hmac-sha256": hashlib.sha256,
+    "hmac-sha1": hashlib.sha1,
+    "hmac-md5": hashlib.md5,
+}
+
+
+def _verify_signature(
+    request: Request,
+    body: bytes,
+    sig_cfg: dict[str, Any],
+) -> bool:
+    """
+    Опциональная HMAC-проверка хука. Большинство CPA не подписывают —
+    тогда sig_cfg.enabled=False и мы возвращаем True (хук валиден после
+    проверки secret_path в URL). Для сетей с подписью валидируем заголовок.
+    """
+    if not sig_cfg.get("enabled"):
+        return True
+
+    secret = (sig_cfg.get("secret") or "").encode("utf-8")
+    if not secret:
+        # Подпись включена, но секрет пуст — конфигурационная ошибка.
+        # Возвращаем False, иначе включение фичи без секрета было бы no-op.
+        logger.warning("signing enabled but secret is empty for path=%s", request.url.path)
+        return False
+
+    digest_mod = _HMAC_DIGEST_MODS.get(sig_cfg.get("algorithm", "hmac-sha256"))
+    if digest_mod is None:
+        logger.warning("unknown signing algorithm: %r", sig_cfg.get("algorithm"))
+        return False
+
+    source = sig_cfg.get("source", "body")
+    if source == "body":
+        payload = body
+    elif source == "query-raw":
+        payload = request.url.query.encode("utf-8")
+    elif source == "path-and-body":
+        payload = request.url.path.encode("utf-8") + body
+    else:
+        logger.warning("unknown signing source: %r", source)
+        return False
+
+    mac = hmac.new(secret, payload, digest_mod)
+    fmt = sig_cfg.get("format", "hex")
+    if fmt == "hex":
+        expected = mac.hexdigest()
+    elif fmt == "base64":
+        expected = base64.b64encode(mac.digest()).decode("ascii")
+    elif fmt == "sha256-prefix-hex":
+        # GitHub/Stripe-style: "sha256=<hex>"
+        expected = "sha256=" + mac.hexdigest()
+    else:
+        logger.warning("unknown signing format: %r", fmt)
+        return False
+
+    header_name = sig_cfg.get("header", "X-Signature")
+    actual = (request.headers.get(header_name, "") or "").strip()
+    # Hex case-insensitive (некоторые CPA шлют uppercase). Base64 case-sensitive.
+    if fmt in ("hex", "sha256-prefix-hex"):
+        actual = actual.lower()
+        expected = expected.lower()
+    return hmac.compare_digest(expected, actual)
+
+
 async def _handle_webhook(slug: str, secret: str, request: Request):
     """Main webhook handler."""
     if not _is_safe_slug(slug):
@@ -97,7 +168,9 @@ async def _handle_webhook(slug: str, secret: str, request: Request):
     if not network.get("is_active", False):
         return _not_found()
 
-    if network.get("secret_path", "") != secret:
+    # constant-time сравнение: theoretically prevents remote timing leak,
+    # практически — гигиена в security-critical коде.
+    if not hmac.compare_digest(network.get("secret_path", "") or "", secret or ""):
         return _not_found()
 
     # Check allowed HTTP method
@@ -106,9 +179,28 @@ async def _handle_webhook(slug: str, secret: str, request: Request):
         if request.method != webhook_method:
             return PlainTextResponse("method not allowed", status_code=405)
 
-    # Reject oversized requests early (before body parsing)
-    content_length = request.headers.get("content-length")
-    if content_length and int(content_length) > MAX_PAYLOAD_BYTES:
+    # Конфиг опциональной HMAC-подписи. Большинство CPA не подписывают —
+    # тогда sig_cfg.enabled=False и проверка пропускается.
+    sig_cfg = network.get("signing") or {}
+
+    # Если подпись считается с query/path и body не нужен — проверяем сразу.
+    # Для source=body отложим проверку до момента, когда тело прочитано.
+    if sig_cfg.get("enabled") and sig_cfg.get("source") in ("query-raw", "path-and-body"):
+        if sig_cfg.get("source") == "path-and-body" and request.method == "POST":
+            pass  # отложим до чтения body
+        else:
+            if not _verify_signature(request, b"", sig_cfg):
+                logger.warning("signature mismatch for slug=%s (source=%s)", slug, sig_cfg.get("source"))
+                return _not_found()
+
+    # Reject oversized requests early (declared Content-Length).
+    # Не падаем на ValueError, если заголовок битый (например, "0, 7" от прокси).
+    content_length_hdr = request.headers.get("content-length", "")
+    try:
+        cl = int(content_length_hdr) if content_length_hdr else -1
+    except ValueError:
+        cl = -1
+    if cl > MAX_PAYLOAD_BYTES:
         return PlainTextResponse("payload too large", status_code=413)
 
     # Rate limiting (atomic: INCR + EXPIRE in single Lua script)
@@ -129,26 +221,51 @@ async def _handle_webhook(slug: str, secret: str, request: Request):
 
     if request.method == "POST":
         content_type = request.headers.get("content-type", "")
+        # multipart/form-data не поддерживается — реальные CPA шлют JSON или
+        # x-www-form-urlencoded. Отвергаем заранее (415), чтобы не тратить
+        # rate-limit и память на чтение body, которое всё равно будет отброшено.
+        if "multipart/form-data" in content_type:
+            logger.warning("multipart/form-data not supported for slug=%s", slug)
+            return PlainTextResponse("multipart not supported", status_code=415)
+
+        # Стримим тело с жёстким cap'ом, чтобы Transfer-Encoding: chunked без CL
+        # не позволил клиенту прокачать гигабайты в event loop. Парсим из bytes
+        # вручную (минуя request.json()/request.form() которые читают unbounded).
+        body = b""
         try:
-            if "application/json" in content_type:
-                body = await request.json()
-                if isinstance(body, dict):
-                    params.update(body)
-            elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
-                form = await request.form()
-                for key, value in form.items():
-                    params[key] = value
-            else:
-                body_bytes = await request.body()
-                if body_bytes:
+            async for chunk in request.stream():
+                body += chunk
+                if len(body) > MAX_PAYLOAD_BYTES:
+                    return PlainTextResponse("payload too large", status_code=413)
+        except Exception:
+            return PlainTextResponse("bad body", status_code=400)
+
+        # HMAC-подпись для source=body / path-and-body — проверяем после чтения.
+        if sig_cfg.get("enabled") and sig_cfg.get("source") in ("body", "path-and-body"):
+            if not _verify_signature(request, body, sig_cfg):
+                logger.warning("signature mismatch for slug=%s (source=%s)", slug, sig_cfg.get("source"))
+                return _not_found()
+
+        if body:
+            try:
+                if "application/json" in content_type:
+                    parsed = json.loads(body)
+                    if isinstance(parsed, dict):
+                        params.update(parsed)
+                elif "application/x-www-form-urlencoded" in content_type:
+                    for k, v in parse_qsl(body.decode("utf-8", errors="replace"),
+                                          keep_blank_values=True):
+                        params[k] = v
+                else:
+                    # Без content-type или неизвестный — пробуем JSON, иначе игнор.
                     try:
-                        body = json.loads(body_bytes)
-                        if isinstance(body, dict):
-                            params.update(body)
+                        parsed = json.loads(body)
+                        if isinstance(parsed, dict):
+                            params.update(parsed)
                     except (json.JSONDecodeError, ValueError):
                         pass
-        except Exception:
-            pass
+            except Exception:
+                pass
 
     if not params:
         return PlainTextResponse("no data", status_code=400)

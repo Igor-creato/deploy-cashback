@@ -204,8 +204,9 @@ SMTP_FROM=${SMTP_FROM}
 # Email для алертов Grafana
 ALERT_EMAIL=${ALERT_EMAIL}
 
-# mysqld-exporter (нужен только для setup-mariadb-users.sh, ALTER USER идемпотентен)
-MYSQL_EXPORTER_PASSWORD=${MYSQL_EXPORTER_PASSWORD}
+# mysqld-exporter пароль больше НЕ хранится в .env — он лежит в
+# secrets/mysql_exporter.cnf (Docker secret) и оттуда читается как самим
+# exporter'ом (--config.my-cnf), так и setup-mariadb-users.sh при ротации.
 EOF
 
 chmod 600 "$INSTALL_DIR/.env"
@@ -225,12 +226,34 @@ printf '%s' "$MYSQL_PASSWORD"      > "$INSTALL_DIR/secrets/db_password.txt"
 printf '%s' "$SMTP_PASSWORD"       > "$INSTALL_DIR/secrets/smtp_password.txt"
 printf '%s' "$GRAFANA_PASSWORD"    > "$INSTALL_DIR/secrets/grafana_admin_password.txt"
 
+# my.cnf для mysqld-exporter: пароль не светится в `docker inspect`.
+# Формат [client] — стандартный, читается флагом --config.my-cnf.
+# Если файл уже существует (re-run install.sh на работающем сервере),
+# НЕ перезаписываем — иначе exporter получит новый пароль, а в MariaDB
+# останется старый, и до запуска setup-mariadb-users.sh exporter не сможет
+# подключиться. setup-mariadb-users.sh прочитает существующий файл и сделает
+# ALTER USER идемпотентно.
+if [[ ! -f "$INSTALL_DIR/secrets/mysql_exporter.cnf" ]]; then
+  cat > "$INSTALL_DIR/secrets/mysql_exporter.cnf" <<EOF
+[client]
+user=exporter
+password=${MYSQL_EXPORTER_PASSWORD}
+EOF
+  log "secrets/mysql_exporter.cnf создан"
+else
+  info "secrets/mysql_exporter.cnf уже существует — оставлен без изменений"
+fi
+
 chmod 700 "$INSTALL_DIR/secrets"
-# Внутри контейнеров /run/secrets/<name> наследует hostовые права;
-# www-data (uid 33), exporter и др. должны читать → mode 644.
-# Защита от внешних процессов обеспечивается chmod 700 на dir.
-chmod 644 "$INSTALL_DIR/secrets/"*.txt
-log "Docker secrets созданы (dir 0700, files 0644)"
+# Compose v2 (без Swarm) bind-mount'ит файлы секретов в /run/secrets/<name>;
+# контейнерные процессы читают через mount, а не через прямые file perms на хосте,
+# поэтому 600 root:root работает (проверено на mariadb / wordpress / grafana).
+# Это критично: 644 позволил бы любому локальному не-root user'у на хосте
+# прочесть db_root_password.txt напрямую (директорный 700 не защищает, если
+# полное имя файла известно — а имена секретов перечислены в compose).
+chmod 600 "$INSTALL_DIR/secrets/"*.txt
+chmod 600 "$INSTALL_DIR/secrets/mysql_exporter.cnf"
+log "Docker secrets созданы (dir 0700, files 0600)"
 
 # ─── Traefik acme.json ────────────────────────────────────
 touch "$INSTALL_DIR/volumes/traefik/acme.json"
@@ -317,7 +340,8 @@ chmod +x "$INSTALL_DIR/scripts/setup-cron.sh" 2>/dev/null || true
 chmod +x "$INSTALL_DIR/scripts/setup-mariadb-users.sh" 2>/dev/null || true
 chmod +x "$INSTALL_DIR/scripts/install-dashboards.sh" 2>/dev/null || true
 chmod +x "$INSTALL_DIR/scripts/fix-wp-perms.sh" 2>/dev/null || true
-log "backup.sh, setup-cron.sh, setup-mariadb-users.sh, install-dashboards.sh, fix-wp-perms.sh готовы"
+chmod +x "$INSTALL_DIR/scripts/cleanup-webhooks.sh" 2>/dev/null || true
+log "backup.sh, setup-cron.sh, setup-mariadb-users.sh, install-dashboards.sh, fix-wp-perms.sh, cleanup-webhooks.sh готовы"
 
 # ─── Системные лимиты ────────────────────────────────────
 info "Настройка системных лимитов..."

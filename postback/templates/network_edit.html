@@ -113,6 +113,63 @@
     </button>
 </div>
 
+<!-- Signature verification (HMAC) -->
+{% set signing = network.signing or {} %}
+<div class="card">
+    <div class="card-title">🔐 Проверка подписи хука (HMAC)</div>
+    <p class="text-muted mb-1">
+        Большинство CPA-сетей <em>не подписывают</em> постбэки —
+        в этом случае оставьте выключенным. Включите только если сеть
+        присылает HMAC-подпись в заголовке (Stripe, GitHub, Tinkoff Acquiring и т.п.).
+    </p>
+
+    <div class="form-row">
+        <label>Включить</label>
+        <label style="min-width: auto; display: flex; align-items: center; gap: 8px;">
+            <input type="checkbox" name="sig_enabled" {% if signing.enabled %}checked{% endif %} style="width: auto;">
+            Проверять HMAC-подпись (отвергать хуки с неверной подписью)
+        </label>
+    </div>
+
+    <div class="form-row">
+        <label>Алгоритм</label>
+        <select name="sig_algorithm">
+            <option value="hmac-sha256" {% if signing.algorithm == 'hmac-sha256' or not signing.algorithm %}selected{% endif %}>HMAC-SHA256</option>
+            <option value="hmac-sha1"   {% if signing.algorithm == 'hmac-sha1' %}selected{% endif %}>HMAC-SHA1</option>
+            <option value="hmac-md5"    {% if signing.algorithm == 'hmac-md5' %}selected{% endif %}>HMAC-MD5</option>
+        </select>
+    </div>
+
+    <div class="form-row">
+        <label>Секрет</label>
+        <input type="password" name="sig_secret" value="" placeholder="{% if signing.secret %}(сохранён, оставьте пустым чтобы не менять){% else %}общий с CPA-сетью секрет{% endif %}">
+    </div>
+
+    <div class="form-row">
+        <label>HTTP-заголовок</label>
+        <input type="text" name="sig_header" value="{{ signing.header | default('X-Signature') }}" placeholder="X-Signature">
+        <span class="text-muted" style="font-size: 12px;">имя заголовка, в котором сеть присылает подпись</span>
+    </div>
+
+    <div class="form-row">
+        <label>Формат подписи</label>
+        <select name="sig_format">
+            <option value="hex"               {% if signing.format == 'hex' or not signing.format %}selected{% endif %}>hex (a3f2…)</option>
+            <option value="base64"            {% if signing.format == 'base64' %}selected{% endif %}>base64</option>
+            <option value="sha256-prefix-hex" {% if signing.format == 'sha256-prefix-hex' %}selected{% endif %}>sha256=&lt;hex&gt; (GitHub/Stripe-style)</option>
+        </select>
+    </div>
+
+    <div class="form-row">
+        <label>Что подписывается</label>
+        <select name="sig_source">
+            <option value="body"          {% if signing.source == 'body' or not signing.source %}selected{% endif %}>тело запроса (body)</option>
+            <option value="query-raw"     {% if signing.source == 'query-raw' %}selected{% endif %}>сырая query-string (для GET)</option>
+            <option value="path-and-body" {% if signing.source == 'path-and-body' %}selected{% endif %}>путь URL + тело</option>
+        </select>
+    </div>
+</div>
+
 <!-- Field Transforms -->
 <div class="card">
     <div class="card-title">🔄 Преобразование полей</div>

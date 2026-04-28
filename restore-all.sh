@@ -281,6 +281,31 @@ for net in proxy db-shared; do
   docker network inspect "$net" >/dev/null 2>&1 || { docker network create "$net" >/dev/null; log "сеть $net создана"; }
 done
 
+# ─── 6b. Backwards compat для старых бэкапов ────────────────
+# До перехода exporter'а на Docker secret, MYSQL_EXPORTER_PASSWORD лежал в .env
+# и не было файла secrets/mysql_exporter.cnf. Compose теперь требует этот secret-
+# файл, поэтому генерируем его до старта стэка, чтобы старые бэкапы не падали.
+EXPORTER_CNF="${STACK_DIR}/secrets/mysql_exporter.cnf"
+if [[ ! -f "$EXPORTER_CNF" ]]; then
+  if [[ -f "${STACK_DIR}/.env" ]]; then
+    # shellcheck disable=SC1091
+    set -a; source "${STACK_DIR}/.env"; set +a
+  fi
+  if [[ -n "${MYSQL_EXPORTER_PASSWORD:-}" ]]; then
+    cat > "$EXPORTER_CNF" <<EOF
+[client]
+user=exporter
+password=${MYSQL_EXPORTER_PASSWORD}
+EOF
+    chmod 600 "$EXPORTER_CNF"
+    log "сгенерирован secrets/mysql_exporter.cnf из .env (миграция со старого бэкапа)"
+  else
+    err "secrets/mysql_exporter.cnf отсутствует и MYSQL_EXPORTER_PASSWORD не задан в .env"
+    err "compose не сможет стартовать mysqld-exporter — восстановите вручную"
+    exit 1
+  fi
+fi
+
 # ─── 7. Поднимаем только mariadb для restore БД ─────────────
 info "стартую mariadb"
 dc_stack up -d mariadb

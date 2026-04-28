@@ -58,3 +58,11 @@ ALTER TABLE `wp_cashback_webhooks`
         DEFAULT NULL
         AFTER `network_slug`,
     ADD INDEX IF NOT EXISTS `idx_processing_status` (`processing_status`);
+
+-- ============================================================
+-- Migration: Index on (received_at, processing_status) для cleanup-job'а.
+-- Без этого индекса nightly DELETE FROM cashback_webhooks WHERE received_at < ...
+-- делает full-table-scan на табл. с 30k+ строк (1 год × 1k/день).
+-- ============================================================
+ALTER TABLE `wp_cashback_webhooks`
+    ADD INDEX IF NOT EXISTS `idx_received_at_status` (`received_at`, `processing_status`);

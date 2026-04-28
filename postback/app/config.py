@@ -121,3 +121,29 @@ DEFAULT_STATUS_MAP: dict[str, str] = {
     "open": "waiting",
     "hold": "waiting",
 }
+
+
+# ============================================================
+# Опциональная HMAC-подпись хука. По умолчанию выключено —
+# большинство CPA-сетей вообще не подписывают свои постбэки.
+# Включается per-network через админку для сетей вроде Stripe,
+# GitHub, Salesforce, Tinkoff Acquiring и т.п., где есть HMAC.
+#
+# algorithm: hmac-sha256 | hmac-sha1 | hmac-md5
+# header:    имя HTTP-заголовка с подписью (X-Signature, Sign,
+#            X-Hub-Signature-256, X-Webhook-Signature, ...)
+# format:    hex                — голый hex-digest "a3f2..."
+#            base64             — base64-кодированный digest
+#            sha256-prefix-hex  — "sha256=a3f2..." (Github/Stripe-style)
+# source:    body               — сырое тело запроса (POST, наиболее частый)
+#            query-raw          — сырая query-string без "?"
+#            path-and-body      — путь URL + body
+# ============================================================
+DEFAULT_SIGNING: dict[str, Any] = {
+    "enabled": False,
+    "algorithm": "hmac-sha256",
+    "secret": "",
+    "header": "X-Signature",
+    "format": "hex",
+    "source": "body",
+}

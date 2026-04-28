@@ -140,12 +140,17 @@ services:
       --maxmemory 256mb
       --maxmemory-policy allkeys-lru
       --save ""
-      --appendonly no
+      --appendonly yes
+      --appendfsync everysec
+      --auto-aof-rewrite-percentage 100
+      --auto-aof-rewrite-min-size 16mb
       --tcp-keepalive 60
       --timeout 300
       --hz 10
       --lfu-log-factor 10
       --activedefrag yes
+    volumes:
+      - redis_data:/data
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 10s
@@ -454,18 +459,19 @@ services:
     restart: unless-stopped
     mem_limit: 64m
     mem_reservation: 16m
+    # Пароль читается из my.cnf-формата файла (Docker secret), а не из
+    # env-переменной — иначе он виден через `docker inspect mysqld-exporter`,
+    # `/proc/<pid>/environ` и любому процессу с доступом к Docker API
+    # (cAdvisor, docker-socket-proxy и т.п.).
     command:
+      - '--config.my-cnf=/run/secrets/mysql_exporter_my_cnf'
       - '--mysqld.address=mariadb:3306'
-      - '--mysqld.username=exporter'
       - '--collect.global_status'
       - '--collect.global_variables'
       - '--collect.info_schema.processlist'
       - '--collect.info_schema.innodb_metrics'
-    environment:
-      # mysqld-exporter v0.16+ читает пароль из MYSQLD_EXPORTER_PASSWORD env-var.
-      # Значение берём из .env (он chmod 600); этот же пароль установлен у
-      # MariaDB-пользователя 'exporter' через ALTER USER в скрипте setup-mariadb-users.sh.
-      MYSQLD_EXPORTER_PASSWORD: ${MYSQL_EXPORTER_PASSWORD}
+    secrets:
+      - mysql_exporter_my_cnf
     networks:
       - internal
     depends_on:
@@ -721,6 +727,8 @@ volumes:
       o: size=512m,uid=101,gid=101
   traefik_logs:
     driver: local
+  redis_data:
+    driver: local
   vm_data:
   vlogs_data:
   grafana_data:
@@ -739,3 +747,7 @@ secrets:
     file: ./secrets/smtp_password.txt
   grafana_admin_password:
     file: ./secrets/grafana_admin_password.txt
+  # my.cnf-формат: [client]\nuser=exporter\npassword=<...>
+  # Генерируется install.sh + setup-mariadb-users.sh; chmod 600 root:root.
+  mysql_exporter_my_cnf:
+    file: ./secrets/mysql_exporter.cnf

@@ -14,6 +14,7 @@ through wp_mail() by the plugin.
 
 Site URL is built from DOMAIN env var (shared .env).
 """
+import hashlib
 import html as _html_lib
 import logging
 import os
@@ -215,10 +216,18 @@ _branding_cache: dict[str, Any] = {}
 _branding_cache_ts: float = 0.0
 
 
+_PHP_UNSER_MAX_BYTES = 64 * 1024
+
+
 def _php_unserialize(value: Any) -> Any:
     """
     Safely PHP-unserialize a wp_options value. Returns the decoded value or
     None on any error (broken data must not break email rendering).
+
+    Размер ограничен _PHP_UNSER_MAX_BYTES: phpserialize.loads — pure-Python
+    рекурсивный парсер, не имеет recursion-/size-guard'а. Глубоко-вложенный
+    blob из скомпрометированного wp_options крашит worker через RecursionError
+    или раздувает память. WP options обычно <10 KB, 64 KB — щедрый лимит.
     """
     if not value:
         return None
@@ -227,6 +236,10 @@ def _php_unserialize(value: Any) -> Any:
     elif isinstance(value, (bytes, bytearray)):
         data = bytes(value)
     else:
+        return None
+    if len(data) > _PHP_UNSER_MAX_BYTES:
+        logger.warning("Refusing to unserialize wp_option of size %d (limit %d)",
+                       len(data), _PHP_UNSER_MAX_BYTES)
         return None
     try:
         return phpserialize.loads(data, decode_strings=True)
@@ -547,14 +560,17 @@ def _send_email(to: str, subject: str, html: str, from_name: str, from_email: st
     msg["To"] = to
     msg.attach(MIMEText(html, "html", "utf-8"))
 
+    # Timeout 5s: 4 worker thread'а × 15s при флапе SMTP замораживали весь pipeline.
+    # 5s покрывает нормальную доставку с запасом, при недоступности SMTP fallback
+    # через enqueue_notification → WP cron сработает в течение пары минут.
     try:
         if SMTP_SECURE == "ssl":
-            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15) as server:
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=5) as server:
                 if SMTP_USER and SMTP_PASSWORD:
                     server.login(SMTP_USER, SMTP_PASSWORD)
                 server.sendmail(from_email, [to], msg.as_string())
         else:
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=5) as server:
                 server.ehlo()
                 if SMTP_SECURE == "tls":
                     server.starttls()
@@ -564,7 +580,10 @@ def _send_email(to: str, subject: str, html: str, from_name: str, from_email: st
                 server.sendmail(from_email, [to], msg.as_string())
         return True
     except Exception:
-        logger.exception("SMTP send failed to=%s", to)
+        # Не светим адрес получателя — exception-трейсбэк может содержать SMTP response,
+        # который у некоторых серверов эхо-репитится с адресом. Хешируем для корреляции.
+        to_hash = hashlib.sha256(to.encode("utf-8")).hexdigest()[:12]
+        logger.exception("SMTP send failed to_sha=%s", to_hash)
         return False
 
 
@@ -631,5 +650,8 @@ def send_transaction_new(
     sent = _send_email(email, subject, html, from_name, from_email)
 
     if sent:
-        logger.info("Email sent to user_id=%s (%s): transaction_new", user_id, email)
+        # Не пишем e-mail в plaintext: docker logs webhook-worker рассылает таблицу
+        # user_id ↔ email кому угодно с доступом к docker socket. Хешируем для корреляции.
+        email_hash = hashlib.sha256(email.encode("utf-8")).hexdigest()[:12]
+        logger.info("Email sent to user_id=%s (sha=%s): transaction_new", user_id, email_hash)
     return sent

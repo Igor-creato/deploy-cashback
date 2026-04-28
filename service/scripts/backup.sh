@@ -11,7 +11,7 @@ STACK_DIR="$(dirname "$SCRIPT_DIR")"
 BACKUP_ROOT="/home/igor/backup"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 BACKUP_DIR="${BACKUP_ROOT}/${TIMESTAMP}"
-RETENTION_COUNT="${BACKUP_RETENTION_COUNT:-3}"
+RETENTION_COUNT="${BACKUP_RETENTION_COUNT:-14}"
 
 # Textfile collector для node-exporter — алерт backup-stale смотрит сюда
 TEXTFILE_DIR="/var/lib/node_exporter/textfile_collector"
