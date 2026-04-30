@@ -25,7 +25,7 @@ read_env() {
   [[ -f "$file" ]] || return 0
   line="$(grep -E "^${key}=" "$file" 2>/dev/null | tail -1 || true)"
   [[ -z "$line" ]] && return 0
-  val="${line#${key}=}"
+  val="${line#"${key}="}"
   if [[ "$val" =~ ^\"(.*)\"$ ]]; then
     val="${BASH_REMATCH[1]}"
   elif [[ "$val" =~ ^\'(.*)\'$ ]]; then

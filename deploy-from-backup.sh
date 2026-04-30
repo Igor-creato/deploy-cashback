@@ -32,6 +32,21 @@ warn() { printf '%s[!]%s %s\n' "$YLW" "$NC" "$*"; }
 err()  { printf '%s[✗]%s %s\n' "$RED" "$NC" "$*" >&2; }
 info() { printf '%s[i]%s %s\n' "$CYN" "$NC" "$*"; }
 
+# Точечное чтение compose-.env без `source` (regex/() в значениях ронят bash).
+read_env() {
+  local file="$1" key="$2" line val
+  [[ -f "$file" ]] || return 0
+  line="$(grep -E "^${key}=" "$file" 2>/dev/null | tail -1 || true)"
+  [[ -z "$line" ]] && return 0
+  val="${line#"${key}="}"
+  if [[ "$val" =~ ^\"(.*)\"$ ]]; then
+    val="${BASH_REMATCH[1]}"
+  elif [[ "$val" =~ ^\'(.*)\'$ ]]; then
+    val="${BASH_REMATCH[1]}"
+  fi
+  printf '%s' "$val"
+}
+
 # ─── Helpers (структура та же, что в install-all.sh) ───────
 ask() {
   local prompt="$1" default="${2:-}" var
@@ -150,11 +165,8 @@ echo
 info "БД:"
 DB_ROOT_PASS="$(cat "${STACK_DIR}/secrets/db_root_password.txt" 2>/dev/null || echo "")"
 if [[ -n "$DB_ROOT_PASS" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "${STACK_DIR}/.env"
-  set +a
-  DB_NAME="${MYSQL_DATABASE:-cashback_db}"
+  DB_NAME="$(read_env "${STACK_DIR}/.env" MYSQL_DATABASE)"
+  DB_NAME="${DB_NAME:-cashback_db}"
   if posts=$(docker exec -e MYSQL_PWD="$DB_ROOT_PASS" mariadb mariadb -u root -N -e \
        "SELECT COUNT(*) FROM ${DB_NAME}.wp_posts" 2>/dev/null); then
     log "wp_posts: ${posts} записей"

@@ -11,6 +11,21 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 STACK_DIR="$(dirname "$SCRIPT_DIR")"
 
+# Точечное чтение compose-.env без `source` (regex/() в значениях ронят bash).
+read_env() {
+  local file="$1" key="$2" line val
+  [[ -f "$file" ]] || return 0
+  line="$(grep -E "^${key}=" "$file" 2>/dev/null | tail -1 || true)"
+  [[ -z "$line" ]] && return 0
+  val="${line#"${key}="}"
+  if [[ "$val" =~ ^\"(.*)\"$ ]]; then
+    val="${BASH_REMATCH[1]}"
+  elif [[ "$val" =~ ^\'(.*)\'$ ]]; then
+    val="${BASH_REMATCH[1]}"
+  fi
+  printf '%s' "$val"
+}
+
 DB_ROOT_PASS="$(cat "${STACK_DIR}/secrets/db_root_password.txt")"
 EXPORTER_CNF="${STACK_DIR}/secrets/mysql_exporter.cnf"
 
@@ -19,10 +34,7 @@ EXPORTER_CNF="${STACK_DIR}/secrets/mysql_exporter.cnf"
 # в .env. Генерируем .cnf из .env для совместимости. После первого install.sh
 # переменная из .env удаляется, но .cnf остаётся как single source of truth.
 if [[ ! -f "$EXPORTER_CNF" ]]; then
-  if [[ -f "${STACK_DIR}/.env" ]]; then
-    # shellcheck disable=SC1091
-    set -a; source "${STACK_DIR}/.env"; set +a
-  fi
+  MYSQL_EXPORTER_PASSWORD="${MYSQL_EXPORTER_PASSWORD:-$(read_env "${STACK_DIR}/.env" MYSQL_EXPORTER_PASSWORD)}"
   if [[ -n "${MYSQL_EXPORTER_PASSWORD:-}" ]]; then
     cat > "$EXPORTER_CNF" <<EOF
 [client]
