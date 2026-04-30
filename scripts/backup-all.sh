@@ -48,13 +48,28 @@ if [[ ! -d "$STACK_DIR" ]]; then
   exit 1
 fi
 
-# ─── Загрузка stack/.env ────────────────────────────────────
-if [[ -f "${STACK_DIR}/.env" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "${STACK_DIR}/.env"
-  set +a
-fi
+# ─── Точечно читаем нужные значения из stack/.env ──────────
+# Не `source`: compose-формат .env шире bash-формата (значения с regex/(),
+# например MODSEC_AUDIT_LOG_RELEVANT_STATUS=^(?:5|4(?!04|03)), валят
+# bash-парсер). Бэкапу из .env нужны только MYSQL_DATABASE и
+# MYSQL_ROOT_PASSWORD — читаем точечно.
+read_env() {
+  local file="$1" key="$2" line val
+  [[ -f "$file" ]] || return 0
+  line="$(grep -E "^${key}=" "$file" 2>/dev/null | tail -1 || true)"
+  [[ -z "$line" ]] && return 0
+  val="${line#${key}=}"
+  if [[ "$val" =~ ^\"(.*)\"$ ]]; then
+    val="${BASH_REMATCH[1]}"
+  elif [[ "$val" =~ ^\'(.*)\'$ ]]; then
+    val="${BASH_REMATCH[1]}"
+  fi
+  printf '%s' "$val"
+}
+
+ENV_FILE="${STACK_DIR}/.env"
+MYSQL_DATABASE="${MYSQL_DATABASE:-$(read_env "$ENV_FILE" MYSQL_DATABASE)}"
+MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-$(read_env "$ENV_FILE" MYSQL_ROOT_PASSWORD)}"
 
 # ─── Пароль root MariaDB ────────────────────────────────────
 DB_ROOT_PASS=""

@@ -16,12 +16,27 @@ RETENTION_COUNT="${BACKUP_RETENTION_COUNT:-3}"
 # Textfile collector для node-exporter — алерт backup-stale смотрит сюда
 TEXTFILE_DIR="/var/lib/node_exporter/textfile_collector"
 
-# Загрузить переменные
-if [[ -f "${STACK_DIR}/.env" ]]; then
-  set -a
-  source "${STACK_DIR}/.env"
-  set +a
-fi
+# Загрузить переменные точечно: compose-формат .env шире bash-формата
+# (значения с regex/() — например MODSEC_AUDIT_LOG_RELEVANT_STATUS — валят
+# bash-парсер при `source`). Из .env нужны только MYSQL_DATABASE и
+# MYSQL_ROOT_PASSWORD — читаем grep'ом без интерпретации.
+read_env() {
+  local file="$1" key="$2" line val
+  [[ -f "$file" ]] || return 0
+  line="$(grep -E "^${key}=" "$file" 2>/dev/null | tail -1 || true)"
+  [[ -z "$line" ]] && return 0
+  val="${line#${key}=}"
+  if [[ "$val" =~ ^\"(.*)\"$ ]]; then
+    val="${BASH_REMATCH[1]}"
+  elif [[ "$val" =~ ^\'(.*)\'$ ]]; then
+    val="${BASH_REMATCH[1]}"
+  fi
+  printf '%s' "$val"
+}
+
+ENV_FILE="${STACK_DIR}/.env"
+MYSQL_DATABASE="${MYSQL_DATABASE:-$(read_env "$ENV_FILE" MYSQL_DATABASE)}"
+MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-$(read_env "$ENV_FILE" MYSQL_ROOT_PASSWORD)}"
 
 # Пароль из secrets
 DB_ROOT_PASS=""
