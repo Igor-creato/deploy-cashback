@@ -185,6 +185,11 @@ services:
       WORDPRESS_DB_NAME: ${MYSQL_DATABASE}
       WORDPRESS_DB_USER: ${MYSQL_USER}
       WORDPRESS_DB_PASSWORD_FILE: /run/secrets/db_password
+      # Условный debug-log (E2E follow-up A1-4): "1" → редиректит plugin'овые
+      # error_log() вызовы в /var/www/html/wp-content/debug.log без активации
+      # WP_DEBUG (без notice/warning spam'а от core/woocommerce). Default "0".
+      # Установка значения в cashback.env / .env на сервере + restart wordpress.
+      WP_DEBUG_ENABLE: "${WP_DEBUG_ENABLE:-0}"
       WORDPRESS_CONFIG_EXTRA: |
         /* ── Memory ── */
         define('WP_MEMORY_LIMIT', '256M');
@@ -214,6 +219,14 @@ services:
         define('DISABLE_WP_CRON', true);
         define('CONCATENATE_SCRIPTS', false);
         define('WP_CACHE', true);
+
+        /* ── Conditional debug log (E2E follow-up A1-4) ── */
+        if (getenv('WP_DEBUG_ENABLE') === '1') {
+          @ini_set('error_log', '/var/www/html/wp-content/debug.log');
+          @ini_set('log_errors', '1');
+          @ini_set('display_errors', '0');
+          define('WP_DEBUG_DISPLAY', false);
+        }
       SMTP_HOST: ${SMTP_HOST}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER}
@@ -255,10 +268,15 @@ services:
         condition: service_healthy
     environment:
       - BACKEND=http://nginx:80
-      - PARANOIA=1
+      - PARANOIA=${MODSEC_PARANOIA:-1}
       - ANOMALY_INBOUND=5
       - ANOMALY_OUTBOUND=4
-      - MODSEC_RULE_ENGINE=DetectionOnly # первые 1-2 недели только логи
+      # E2E follow-up A1-3: переключение из DetectionOnly в On — через .env на
+      # сервере (MODSEC_RULE_ENGINE=On). Дефолт остаётся DetectionOnly, чтобы
+      # `git pull` без обновления .env не блокировал legitimate trafic.
+      # Перед переключением проверить modsec_audit.log за неделю — не должно быть
+      # ложных срабатываний на admin-AJAX / WC-checkout / cashback-extension.
+      - MODSEC_RULE_ENGINE=${MODSEC_RULE_ENGINE:-DetectionOnly}
       - ALLOWED_METHODS=GET HEAD POST OPTIONS PUT PATCH DELETE
       - MAX_FILE_SIZE=67108864
       # ── Audit log в shared volume для CrowdSec ──
