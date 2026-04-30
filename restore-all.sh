@@ -217,8 +217,12 @@ tar xzf "${BACKUP_DIR}/stack-configs.tar.gz" -C "$STACK_DIR" --same-owner --same
 # В старых бэкапах nginx.conf содержал bypass на 'wp_woocommerce_session_*',
 # из-за чего гостям вообще не отдавался кэш (WC ставит эту cookie любому).
 # Авто-правкой не лезем — конфиг могут править вручную; просто предупреждаем.
+# Регулярка матчит только реальную map-строку '    ~*wp_woocommerce_session_ 1;',
+# но не комментарий '# ВАЖНО: НЕ добавлять сюда wp_woocommerce_session_*' в
+# актуальном nginx.conf (иначе ворнинг сыпался бы на каждом restore из current
+# бэкапа — false-positive).
 NGINX_CONF="${STACK_DIR}/volumes/nginx/nginx.conf"
-if [[ -f "$NGINX_CONF" ]] && grep -q 'wp_woocommerce_session_' "$NGINX_CONF"; then
+if [[ -f "$NGINX_CONF" ]] && grep -qE '^[[:space:]]*~\*wp_woocommerce_session_' "$NGINX_CONF"; then
   warn "В восстановленном nginx.conf найдено правило bypass на 'wp_woocommerce_session_'"
   warn "  — это старая конфигурация: гостям FastCGI cache отдаваться не будет."
   warn "Удали эту строку из ${NGINX_CONF} (блок 'map \$http_cookie \$skip_cache_cookie')"
