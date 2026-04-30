@@ -35,6 +35,17 @@ REAL_GROUP="$(id -gn "$REAL_USER" 2>/dev/null || echo "root")"
 
 # WP_ROOT: $1 → env WP_ROOT → авто (../volumes/wordpress относительно скрипта).
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Подхватить DEPLOY_USER из cashback.env при прямом запуске
+# (sudo bash fix-wp-perms.sh). При вызове из restore-all.sh переменная
+# уже в env — в этом случае source ничего не меняет.
+if [[ -z "${DEPLOY_USER:-}" ]]; then
+  CASHBACK_ENV_CANDIDATE="$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd)/cashback.env"
+  if [[ -f "$CASHBACK_ENV_CANDIDATE" ]]; then
+    # shellcheck disable=SC1090
+    set -a; source "$CASHBACK_ENV_CANDIDATE"; set +a
+  fi
+fi
 WP_ROOT="${1:-${WP_ROOT:-${SCRIPT_DIR}/../volumes/wordpress}}"
 WP_ROOT="$(cd "$(dirname "$WP_ROOT")" 2>/dev/null && pwd)/$(basename "$WP_ROOT")" || true
 
