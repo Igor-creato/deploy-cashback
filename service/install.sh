@@ -320,7 +320,15 @@ chmod 755 "$INSTALL_DIR/volumes/modsec-logs"
 # Скрипт оставляет владельца www-data:www-data и через POSIX ACL даёт REAL_USER
 # rwx на wp-content/ — так администратор хоста может писать туда без sudo,
 # не ломая работу контейнера. Соответствует WordPress Hardening Guide.
+#
+# DEPLOY_USER (опционально) подхватывается из cashback.env при наличии файла —
+# fix-wp-perms.sh выдаст ему такие же ACL. Без файла блок пропускается.
 chmod +x "$INSTALL_DIR/scripts/fix-wp-perms.sh" 2>/dev/null || true
+CASHBACK_ENV_FILE="$(cd "$INSTALL_DIR/.." && pwd)/cashback.env"
+if [[ -f "$CASHBACK_ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  set -a; source "$CASHBACK_ENV_FILE"; set +a
+fi
 bash "$INSTALL_DIR/scripts/fix-wp-perms.sh" "$INSTALL_DIR/volumes/wordpress"
 
 log "Права на volumes установлены"

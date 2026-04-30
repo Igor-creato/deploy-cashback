@@ -118,6 +118,26 @@ else
   log "ACL установлены: ${REAL_USER} получил rwx на ${WP_CONTENT}"
 fi
 
+# ─── Дополнительный CI/CD пользователь (опционально) ────────
+# DEPLOY_USER (например "deployer" для GitHub Actions) получает те же
+# ACL-права на wp-content, чтобы `git pull` через SSH в плагине-репо
+# не падал с `cannot open .git/FETCH_HEAD: Permission denied` после
+# ребилда volume / restore. Пустая переменная = блок пропускается.
+DEPLOY_USER="${DEPLOY_USER:-}"
+if [[ -n "$DEPLOY_USER" && "$DEPLOY_USER" != "$REAL_USER" && "$DEPLOY_USER" != "root" ]]; then
+  if ! id -u "$DEPLOY_USER" >/dev/null 2>&1; then
+    warn "DEPLOY_USER=${DEPLOY_USER} не существует в системе — пропускаю ACL для него"
+  else
+    info "Применение ACL: u:${DEPLOY_USER}:rwX на ${WP_CONTENT} (рекурсивно)"
+    setfacl -R -m "u:${DEPLOY_USER}:rwX" "$WP_CONTENT"
+
+    info "Default ACL для ${DEPLOY_USER} (новые файлы)"
+    setfacl -R -d -m "u:${DEPLOY_USER}:rwx" "$WP_CONTENT"
+
+    log "ACL установлены: ${DEPLOY_USER} получил rwx на ${WP_CONTENT}"
+  fi
+fi
+
 # ─── Подтверждение ──────────────────────────────────────────
 echo ""
 info "Текущий ACL ${WP_CONTENT}:"
