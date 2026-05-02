@@ -195,6 +195,24 @@ if [[ -n "$DEPLOY_USER" && "$DEPLOY_USER" != "$REAL_USER" && "$DEPLOY_USER" != "
   fi
 fi
 
+# ─── Recalculate ACL mask после chmod ───────────────────────
+# chmod 0644/0755 (выше, после chown) пересоздаёт mode bits, и на файлах с
+# extended ACL это сбрасывает ACL mask до group-bits (r-- для 0644, r-x для
+# 0755). После этого ВСЕ extended entries (u:igor, u:deployer, u:33) теряют
+# write через mask и git pull падает на:
+#   error: cannot open .git/FETCH_HEAD: Permission denied
+#
+# Воспроизведено 2026-05-02 после restore-all.sh / ручного fix-wp-perms.sh:
+# getfacl wp-content/plugins/cash-back/.git/FETCH_HEAD →
+#   user:igor:rw-     #effective:r--
+#   user:deployer:rw- #effective:r--
+#   mask::r--
+#
+# Принудительный setfacl -m m::rwx восстанавливает mask и effective rights
+# для всех extended ACL entries. Идемпотентно: безопасно вызывать повторно.
+info "Восстановление ACL mask=rwx (после chmod) для extended entries"
+setfacl -R -m "m::rwx" "$WP_CONTENT"
+
 # ─── Подтверждение ──────────────────────────────────────────
 echo ""
 info "Текущий ACL ${WP_CONTENT}:"
