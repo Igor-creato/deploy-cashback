@@ -2,6 +2,9 @@
 # MariaDB — Production Configuration
 # Target: WordPress + WooCommerce cashback
 # Server: 4-8GB RAM VPS
+#
+# ВАЖНО: единственный источник правды для MariaDB-настроек.
+# Любая правка только тут (не плодить *.cnf файлов в conf.d/).
 # ═══════════════════════════════════════════
 
 [mysqld]
@@ -12,14 +15,26 @@
 default-time-zone = '+00:00'
 
 # ── Character Set ──
+# utf8mb4_unicode_520_ci — Unicode 5.2.0 правила сортировки.
+# КРИТИЧНО: правит сортировку кириллицы (Е/Ё, русский алфавит) и диакритик.
+# С дефолтной utf8mb4_general_ci ломается фильтр магазинов по русским названиям.
+# Не менять без миграции существующих таблиц.
 character_set_server = utf8mb4
 collation_server = utf8mb4_unicode_520_ci
 
 # ── InnoDB Engine ──
-innodb_buffer_pool_size = 512M
-innodb_log_file_size = 256M
+# buffer_pool 768M = ~50% от mem_limit контейнера 1536M (баланс кэш / overhead).
+innodb_buffer_pool_size = 768M
+# 128M log file: чаще merge → меньше пик I/O при flush, для 1k req/day достаточно.
+innodb_log_file_size = 128M
 innodb_log_buffer_size = 16M
+# flush_log_at_trx_commit=2: журнал транзакций сбрасывается раз в секунду
+# (не на каждый commit). Окно потери = ~1с при OS-крэше (не процесса!).
+# Для тестового стэка приемлемо. Для prod вернуть = 1.
 innodb_flush_log_at_trx_commit = 2
+# O_DIRECT: убирает дублирование между MariaDB cache и OS page cache.
+# На NVMe — стабильнее latency.
+innodb_flush_method = O_DIRECT
 innodb_io_capacity = 2000
 innodb_io_capacity_max = 4000
 innodb_read_io_threads = 4
@@ -27,6 +42,8 @@ innodb_write_io_threads = 4
 innodb_adaptive_hash_index = ON
 innodb_doublewrite = 1
 innodb_stats_on_metadata = OFF
+innodb_stats_persistent = ON
+innodb_stats_persistent_sample_pages = 20
 innodb_lock_wait_timeout = 10
 
 # ── Connections ──
@@ -58,18 +75,33 @@ read_buffer_size = 2M
 read_rnd_buffer_size = 4M
 
 # ── Slow Query Log ──
-slow_query_log = 1
+# Выключен: метрики slow_queries уже собирает mysqld-exporter
+# (через global_status). Файл-лог только грузил диск.
+# Чтобы временно включить для расследования — set global slow_query_log=1
+# через mysql cli (без редактирования файла и рестарта).
+slow_query_log = 0
 long_query_time = 1
-slow_query_log_file = /var/log/mysql/slow.log
-log_queries_not_using_indexes = ON
-log_slow_filter = admin,filesort,filesort_on_disk,filesort_priority_queue,full_join,full_scan,query_cache,query_cache_miss,tmp_table,tmp_table_on_disk
+log_queries_not_using_indexes = OFF
 
-# ── Binary Log (point-in-time recovery) ──
-log_bin = mysql-bin
-binlog_expire_logs_seconds = 604800
-binlog_format = ROW
-sync_binlog = 0
-max_binlog_size = 256M
+# ── General Log — выключен (создавал бы запись каждого запроса) ──
+general_log = 0
+
+# ── Binary Log ──
+# ВЫКЛЮЧЕН: на single-instance без репликации binlog не нужен и пишет на каждый
+# write-запрос (главный источник I/O в БД). PITR делается через ежедневный
+# дамп scripts/backup-all.sh — этого достаточно для тестового стэка.
+#
+# Если возвращаешь PITR (например при переезде на prod):
+#  1. Удалить строку skip-log-bin
+#  2. Раскомментировать log_bin/binlog_expire/binlog_format/sync_binlog/max_binlog_size
+#  3. log_bin_trust_function_creators=ON оставить (нужно для CREATE TRIGGER без SUPER)
+#  4. restart mariadb
+skip-log-bin
+# log_bin = mysql-bin
+# binlog_expire_logs_seconds = 604800
+# binlog_format = ROW
+# sync_binlog = 0
+# max_binlog_size = 256M
 # Required so cashback_user (no SUPER) can CREATE TRIGGER while log_bin=ON.
 # Без этого Mariadb_Plugin::create_triggers() падает на активации плагина.
 log_bin_trust_function_creators = ON
@@ -89,4 +121,3 @@ default_character_set = utf8mb4
 
 [mysql]
 default_character_set = utf8mb4
-
