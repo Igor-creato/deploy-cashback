@@ -135,6 +135,18 @@ if [[ -f "${WP_ROOT}/wp-config.php" ]]; then
   info "wp-config.php → 0640"
 fi
 
+# ─── service/secrets/ → dir 0700 ────────────────────────────
+# Защита периметра docker-secrets. install.sh ставит 0700, но restore-all.sh
+# и ручные операции могут сбить до 0755 (видели регрессию 2026-05-02).
+# Сами файлы внутри остаются 0644 — это by design (см. ../SECRETS.md):
+# контейнеры grafana (UID 472) и mysqld-exporter (UID 65534) читают через
+# bind-mount, и если поставить 0600 owned host-UID, они получат permission denied.
+SECRETS_DIR="$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd)/secrets"
+if [[ -d "$SECRETS_DIR" ]]; then
+  chmod 0700 "$SECRETS_DIR"
+  info "secrets/ → 0700 (содержимое не трогаем)"
+fi
+
 # ─── ACL для wp-content/ ────────────────────────────────────
 WP_CONTENT="${WP_ROOT}/wp-content"
 if [[ ! -d "$WP_CONTENT" ]]; then
