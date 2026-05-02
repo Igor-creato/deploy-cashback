@@ -37,7 +37,8 @@ DASHBOARDS=(
   "1860:latest:node-exporter-full.json:Node Exporter Full (CPU/RAM/диск/сеть/IO хоста)"
   "14282:latest:cadvisor-compute-resources.json:cAdvisor Compute Resources (контейнеры)"
   "14057:latest:mysql-overview.json:MySQL Overview (mysqld-exporter)"
-  "763:latest:redis-dashboard.json:Redis Dashboard (redis-exporter)"
+  # Redis Dashboard (#763) убран — redis-exporter удалён в INFRA OPTIMIZE 2026-05-02.
+  # Вернуть, если будешь возвращать redis-exporter в compose.
   "11074:latest:node-exporter-for-prometheus.json:Node Exporter / Prometheus alt"
 )
 
