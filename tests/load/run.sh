@@ -65,8 +65,13 @@ fi
 # ── 4. Pre-test sanity ──────────────────────────────────────────────────
 echo "[$(date -Iseconds)] === Pre-test sanity check ==="
 
+SSH_PORT="${SSH_PORT:-22}"
+SSH_KEY_PATH="${SSH_KEY:-~/.ssh/id_rsa}"
+REDIS_CONTAINER="${REDIS_CONTAINER:-redis}"
+SSH_BASE=(ssh -i "$SSH_KEY_PATH" -p "$SSH_PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
+
 # 4a. loadtest_mode на стенде должен быть on
-if ssh -i "${SSH_KEY:-~/.ssh/id_rsa}" "$SSH_USER@$SSH_HOST" \
+if "${SSH_BASE[@]}" "$SSH_USER@$SSH_HOST" \
      "docker exec $WP_CONTAINER wp option get loadtest_mode --allow-root 2>/dev/null" | grep -q '^on$'; then
   echo "  ✓ loadtest_mode=on"
 else
@@ -85,11 +90,9 @@ fi
 
 # 4c. Очистка кэшей и очередей перед прогоном
 echo "[$(date -Iseconds)] === Pre-test cleanup ==="
-ssh -i "${SSH_KEY:-~/.ssh/id_rsa}" "$SSH_USER@$SSH_HOST" bash -se <<'REMOTE'
-  set -e
-  docker exec wordpress wp cache flush --allow-root 2>/dev/null || true
-  docker exec service-redis-1 redis-cli -n 1 DEL webhook:queue webhook:dlq >/dev/null || true
-REMOTE
+"${SSH_BASE[@]}" "$SSH_USER@$SSH_HOST" \
+  "docker exec $WP_CONTAINER wp cache flush --allow-root 2>/dev/null || true; \
+   docker exec $REDIS_CONTAINER redis-cli -n 1 DEL webhook:queue webhook:dlq >/dev/null || true"
 echo "  ✓ caches and queues flushed"
 
 # ── 5. Подготовка результатов ──────────────────────────────────────────
@@ -99,8 +102,8 @@ mkdir -p "$RUN_DIR"
 echo "[$(date -Iseconds)] === Run dir: $RUN_DIR ==="
 
 # Сохранить срез конфига стенда (для verdict.md)
-ssh -i "${SSH_KEY:-~/.ssh/id_rsa}" "$SSH_USER@$SSH_HOST" \
-    "cd /home/$SSH_USER && git -C deploy/cash-back log -1 --format='%H %s' 2>/dev/null || echo 'no-git'" \
+"${SSH_BASE[@]}" "$SSH_USER@$SSH_HOST" \
+    "git -C ~/cash-back/deploy-cashback log -1 --format='%H %s' 2>/dev/null || echo 'no-git'" \
     > "$RUN_DIR/stand-version.txt" || true
 
 # ── 6. Grafana annotation: начало прогона ───────────────────────────────

@@ -18,8 +18,9 @@ LOADTEST_USER_COUNT="${LOADTEST_USER_COUNT:-200}"
 LOADTEST_PRODUCT_COUNT="${LOADTEST_PRODUCT_COUNT:-50}"
 LOADTEST_CLICK_COUNT="${LOADTEST_CLICK_COUNT:-200}"
 SSH_KEY="${SSH_KEY:-~/.ssh/id_rsa}"
+SSH_PORT="${SSH_PORT:-22}"
 
-SSH_OPTS=(-i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
+SSH_OPTS=(-i "$SSH_KEY" -p "$SSH_PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
 
 echo "[$(date -Iseconds)] === Seed start ==="
 echo "  users    = $LOADTEST_USER_COUNT"
@@ -38,21 +39,20 @@ upload_and_run() {
   local local_path="$SCRIPT_DIR/$script_name"
 
   echo "[$(date -Iseconds)] → running $script_name"
-  # Копируем во временный файл внутри контейнера через stdin
-  ssh "${SSH_OPTS[@]}" "$SSH_USER@$SSH_HOST" \
-    "docker exec -i $WP_CONTAINER tee /tmp/$script_name >/dev/null" < "$local_path"
-
-  # eval-file с переменными окружения
-  ssh "${SSH_OPTS[@]}" "$SSH_USER@$SSH_HOST" \
-    "docker exec \
-      -e LOADTEST_PASS='$LOADTEST_PASS' \
-      -e LOADTEST_USER_COUNT='$LOADTEST_USER_COUNT' \
-      -e LOADTEST_PRODUCT_COUNT='$LOADTEST_PRODUCT_COUNT' \
-      -e LOADTEST_CLICK_COUNT='$LOADTEST_CLICK_COUNT' \
-      $WP_CONTAINER wp eval-file /tmp/$script_name --allow-root"
+  # 1) scp на host:/tmp, 2) docker cp в контейнер, 3) eval-file, 4) cleanup.
+  scp -i "$SSH_KEY" -P "$SSH_PORT" -o BatchMode=yes \
+      "$local_path" "$SSH_USER@$SSH_HOST:/tmp/$script_name" >/dev/null
 
   ssh "${SSH_OPTS[@]}" "$SSH_USER@$SSH_HOST" \
-    "docker exec $WP_CONTAINER rm -f /tmp/$script_name"
+    "docker cp /tmp/$script_name $WP_CONTAINER:/tmp/$script_name && \
+     docker exec \
+       -e LOADTEST_PASS='$LOADTEST_PASS' \
+       -e LOADTEST_USER_COUNT='$LOADTEST_USER_COUNT' \
+       -e LOADTEST_PRODUCT_COUNT='$LOADTEST_PRODUCT_COUNT' \
+       -e LOADTEST_CLICK_COUNT='$LOADTEST_CLICK_COUNT' \
+       $WP_CONTAINER wp eval-file /tmp/$script_name --allow-root && \
+     docker exec $WP_CONTAINER rm -f /tmp/$script_name && \
+     rm -f /tmp/$script_name"
 }
 
 upload_and_run seed_users.php

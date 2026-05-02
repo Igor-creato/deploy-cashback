@@ -11,6 +11,9 @@ set -euo pipefail
 : "${SSH_USER:?required}"
 : "${WP_CONTAINER:?required}"
 SSH_KEY="${SSH_KEY:-~/.ssh/id_rsa}"
+SSH_PORT="${SSH_PORT:-22}"
+REDIS_CONTAINER="${REDIS_CONTAINER:-redis}"
+WP_CONTAINER="${WP_CONTAINER:-wordpress}"
 
 echo "=== Teardown plan ==="
 echo "Will DELETE on stand $SSH_HOST:"
@@ -27,11 +30,11 @@ if [[ "$confirm" != "YES" ]]; then
   echo "Aborted."; exit 1
 fi
 
-SSH_OPTS=(-i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
+SSH_OPTS=(-i "$SSH_KEY" -p "$SSH_PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
 
-ssh "${SSH_OPTS[@]}" "$SSH_USER@$SSH_HOST" bash -se <<'REMOTE'
+ssh "${SSH_OPTS[@]}" "$SSH_USER@$SSH_HOST" "WP_CONTAINER='$WP_CONTAINER' REDIS_CONTAINER='$REDIS_CONTAINER' bash -se" <<'REMOTE'
 set -e
-WP="docker exec wordpress wp --allow-root"
+WP="docker exec $WP_CONTAINER wp --allow-root"
 
 echo "→ delete users by login prefix"
 USER_IDS=$($WP db query \
@@ -66,7 +69,7 @@ echo "→ purge cashback_webhooks loadtest rows"
 $WP db query "DELETE FROM wp_cashback_webhooks WHERE network_slug='loadtest' OR payload LIKE '%loadtest%';" || true
 
 echo "→ flush Redis queue/dlq"
-docker exec service-redis-1 redis-cli -n 1 DEL webhook:queue webhook:dlq >/dev/null || true
+docker exec "$REDIS_CONTAINER" redis-cli -n 1 DEL webhook:queue webhook:dlq >/dev/null || true
 
 echo "→ remove loadtest options"
 $WP option delete loadtest_users_manifest loadtest_products_manifest loadtest_clicks_manifest 2>/dev/null || true

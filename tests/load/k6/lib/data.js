@@ -3,10 +3,13 @@
 import { SharedArray } from 'k6/data';
 import { cfg } from './config.js';
 
-// Если файл недоступен (например, тест без seed) — возвращаем фолбэк-генератор.
+// Путь к манифестам можно переопределить через MANIFEST_DIR.
+// k6 open() резолвит относительно файла, который вызывает (lib/data.js),
+// поэтому ../../seed/data из tests/load/k6/lib даёт tests/load/seed/data.
+const manifestDir = (__ENV.MANIFEST_DIR || '../../seed/data').replace(/\/+$/, '');
+
 function safeLoad(path, fallback) {
   try {
-    // open() работает только в init-фазе.
     return JSON.parse(open(path));
   } catch (e) {
     return fallback;
@@ -15,7 +18,7 @@ function safeLoad(path, fallback) {
 
 export const users = new SharedArray('users', () =>
   safeLoad(
-    '/scripts/../seed/data/users.json',
+    `${manifestDir}/users.json`,
     Array.from({ length: cfg.userCount }, (_, i) => ({
       id: 1000 + i,
       login: `loadtest_user_${String(i + 1).padStart(3, '0')}`,
@@ -25,7 +28,7 @@ export const users = new SharedArray('users', () =>
 
 export const products = new SharedArray('products', () =>
   safeLoad(
-    '/scripts/../seed/data/products.json',
+    `${manifestDir}/products.json`,
     Array.from({ length: cfg.productCount }, (_, i) => ({
       id: 2000 + i,
       slug: `loadtest-product-${String(i + 1).padStart(3, '0')}`,
@@ -36,7 +39,7 @@ export const products = new SharedArray('products', () =>
 );
 
 export const clicks = new SharedArray('clicks', () =>
-  safeLoad('/scripts/../seed/data/clicks.json', []),
+  safeLoad(`${manifestDir}/clicks.json`, []),
 );
 
 export function pickUser() {

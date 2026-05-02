@@ -83,9 +83,12 @@ export function activateFlow() {
       tags: { name: 'rest', endpoint: 'activate' },
     },
   );
-  // 200 — ok, 429 — ожидаемый rate-limit под стрессом, не считаем дефектом.
+  const ok = r.status === 200 || r.status === 429;
+  if (!ok) {
+    console.error(`activate failed: status=${r.status} body=${(r.body || '').toString().slice(0, 300)}`);
+  }
   check(r, {
-    'activate 200 or 429': (x) => x.status === 200 || x.status === 429,
+    'activate 200 or 429': () => ok,
   });
 }
 
