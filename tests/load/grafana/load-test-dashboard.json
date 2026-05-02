@@ -1,0 +1,223 @@
+{
+  "title": "Cash-back — Load Test",
+  "uid": "cashback-loadtest",
+  "tags": ["loadtest", "cashback"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "DS",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": { "selected": false, "text": "VictoriaMetrics", "value": "victoriametrics-uid" },
+        "hide": 0
+      },
+      {
+        "name": "testid",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${DS}" },
+        "query": "label_values(k6_http_reqs_total, testid)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": false,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "name": "loadtest",
+        "datasource": "-- Grafana --",
+        "iconColor": "rgba(255, 96, 96, 1)",
+        "enable": true,
+        "tags": ["loadtest"]
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "row", "title": "k6 client metrics",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "k6 RPS (by scenario)",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "targets": [{
+        "expr": "sum by (scenario) (rate(k6_http_reqs_total{testid=~\"$testid\"}[1m]))",
+        "legendFormat": "{{scenario}}",
+        "refId": "A"
+      }],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "k6 latency p50/p95/p99 (by name)",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "targets": [
+        { "expr": "k6_http_req_duration_seconds{quantile=\"0.5\",testid=~\"$testid\"}", "legendFormat": "p50 {{name}}", "refId": "A" },
+        { "expr": "k6_http_req_duration_seconds{quantile=\"0.95\",testid=~\"$testid\"}", "legendFormat": "p95 {{name}}", "refId": "B" },
+        { "expr": "k6_http_req_duration_seconds{quantile=\"0.99\",testid=~\"$testid\"}", "legendFormat": "p99 {{name}}", "refId": "C" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 4, "type": "stat", "title": "k6 error rate (HTTP failed)",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 9 },
+      "targets": [{
+        "expr": "sum(rate(k6_http_req_failed_total{testid=~\"$testid\"}[1m])) / sum(rate(k6_http_reqs_total{testid=~\"$testid\"}[1m]))",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 0.005 },
+            { "color": "red", "value": 0.01 }
+          ]}
+        }
+      }
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "k6 VUs",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 9 },
+      "targets": [{ "expr": "k6_vus{testid=~\"$testid\"}", "legendFormat": "vus", "refId": "A" }]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "k6 checks (rate)",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 9 },
+      "targets": [{
+        "expr": "sum by (check) (rate(k6_checks_total{testid=~\"$testid\"}[1m]))",
+        "legendFormat": "{{check}}",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 10, "type": "row", "title": "Server: Nginx + PHP-FPM",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 }
+    },
+    {
+      "id": 11, "type": "timeseries", "title": "Nginx requests by status (server-side)",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [{
+        "expr": "sum by (status) (rate(nginx_http_requests_total[1m]))",
+        "legendFormat": "{{status}}",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 12, "type": "timeseries", "title": "PHP-FPM: active processes / listen queue",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        { "expr": "phpfpm_active_processes", "legendFormat": "active", "refId": "A" },
+        { "expr": "phpfpm_idle_processes",   "legendFormat": "idle",   "refId": "B" },
+        { "expr": "phpfpm_listen_queue",     "legendFormat": "listen_queue (CRIT)", "refId": "C" },
+        { "expr": "rate(phpfpm_max_children_reached_total[1m])", "legendFormat": "max_children_reached/s", "refId": "D" }
+      ]
+    },
+
+    {
+      "id": 20, "type": "row", "title": "Database & Cache",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 }
+    },
+    {
+      "id": 21, "type": "timeseries", "title": "MySQL threads (running / connected)",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 25 },
+      "targets": [
+        { "expr": "mysql_global_status_threads_running", "legendFormat": "running", "refId": "A" },
+        { "expr": "mysql_global_status_threads_connected", "legendFormat": "connected", "refId": "B" },
+        { "expr": "rate(mysql_global_status_aborted_connects[1m])", "legendFormat": "aborted/s", "refId": "C" }
+      ]
+    },
+    {
+      "id": 22, "type": "timeseries", "title": "MySQL slow / Innodb hit",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 25 },
+      "targets": [
+        { "expr": "rate(mysql_global_status_slow_queries[5m])", "legendFormat": "slow/s", "refId": "A" },
+        { "expr": "1 - (mysql_global_status_innodb_buffer_pool_reads / mysql_global_status_innodb_buffer_pool_read_requests)", "legendFormat": "buffer_pool_hit_ratio", "refId": "B" }
+      ]
+    },
+    {
+      "id": 23, "type": "timeseries", "title": "Redis: memory & evictions",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 33 },
+      "targets": [
+        { "expr": "redis_memory_used_bytes", "legendFormat": "used", "refId": "A" },
+        { "expr": "redis_memory_max_bytes", "legendFormat": "max", "refId": "B" },
+        { "expr": "rate(redis_evicted_keys_total[1m])", "legendFormat": "evicted/s", "refId": "C" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" } }
+    },
+    {
+      "id": 24, "type": "timeseries", "title": "Webhook queue / DLQ (Redis DB 1)",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 33 },
+      "targets": [
+        { "expr": "webhook_queue_size", "legendFormat": "queue", "refId": "A" },
+        { "expr": "webhook_dlq_size",   "legendFormat": "dlq (CRIT)", "refId": "B" }
+      ]
+    },
+    {
+      "id": 25, "type": "timeseries", "title": "Worker: processed by result",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 33 },
+      "targets": [{
+        "expr": "sum by (result) (rate(webhook_processed_total[1m]))",
+        "legendFormat": "{{result}}",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 30, "type": "row", "title": "Host",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 }
+    },
+    {
+      "id": 31, "type": "timeseries", "title": "CPU (user/system/iowait/steal)",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 42 },
+      "targets": [
+        { "expr": "sum by (mode) (rate(node_cpu_seconds_total{mode!=\"idle\"}[1m])) / count(count by (cpu) (node_cpu_seconds_total))", "legendFormat": "{{mode}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit" } }
+    },
+    {
+      "id": 32, "type": "timeseries", "title": "Memory & swap",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 42 },
+      "targets": [
+        { "expr": "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes", "legendFormat": "used", "refId": "A" },
+        { "expr": "node_memory_MemAvailable_bytes", "legendFormat": "available", "refId": "B" },
+        { "expr": "node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes", "legendFormat": "swap_used", "refId": "C" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" } }
+    },
+    {
+      "id": 33, "type": "timeseries", "title": "Load average / disk I/O",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 50 },
+      "targets": [
+        { "expr": "node_load1",  "legendFormat": "load1",  "refId": "A" },
+        { "expr": "node_load5",  "legendFormat": "load5",  "refId": "B" },
+        { "expr": "rate(node_disk_io_time_seconds_total[1m])", "legendFormat": "disk_io_time {{device}}", "refId": "C" },
+        { "expr": "rate(node_network_receive_bytes_total{device!=\"lo\"}[1m]) * 8", "legendFormat": "net_rx_bps {{device}}", "refId": "D" },
+        { "expr": "rate(node_network_transmit_bytes_total{device!=\"lo\"}[1m]) * 8", "legendFormat": "net_tx_bps {{device}}", "refId": "E" }
+      ]
+    }
+  ]
+}

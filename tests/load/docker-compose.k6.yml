@@ -1,0 +1,18 @@
+# Альтернативный запуск k6 через docker compose (если не хочется параметризовать docker run).
+# Использование:
+#   docker compose -f docker-compose.k6.yml run --rm k6 run /scripts/scenario_smoke.js
+#
+# Переменные окружения подтягиваются из ../.env (см. .env.example).
+
+services:
+  k6:
+    image: grafana/k6:latest
+    network_mode: host
+    volumes:
+      - ./k6:/scripts:ro
+      - ./results:/results
+    env_file:
+      - .env
+    environment:
+      K6_PROMETHEUS_RW_TREND_STATS: "p(50),p(95),p(99),avg,max"
+    entrypoint: ["k6"]
