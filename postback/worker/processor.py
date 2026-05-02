@@ -41,6 +41,14 @@ QUEUE_KEY = "webhook:queue"
 DLQ_KEY = "webhook:dlq"  # dead letter queue
 DLQ_MAX_LEN = 9999
 
+# Sanity-floor для unix-timestamp полей webhook payload'а.
+# 1577836800 = 2020-01-01 00:00:00 UTC. Защищает от silent-fail при action_date=0:
+# раньше epoch=0 проходил `_convert_unix_timestamp` как строка "0", INSERT падал на
+# DATETIME, но webhook processing_status уже стоял 'ok' до insert'а (F-S3-04).
+# Не ужесточать — CPA-сети шлют refund-постбэки с задержкой 30-60 дней
+# (см. plans/sparkling-yawning-lamport.md G7).
+MIN_UNIX_TIMESTAMP = 1577836800
+
 # Чувствительные поля webhook payload'а — маскируем перед записью в DLQ,
 # т.к. DLQ хранится в Redis и читается через redis-exporter / docker exec.
 _DLQ_SENSITIVE_FIELDS = frozenset((
@@ -143,6 +151,63 @@ def apply_field_transforms(
     return result
 
 
+def _validate_unix_timestamp_fields(
+    data: dict[str, Any],
+    transforms: dict[str, str] | None,
+    *,
+    min_timestamp: int = MIN_UNIX_TIMESTAMP,
+) -> str | None:
+    """
+    Sanity-валидация unix_timestamp полей mapped-payload'а.
+
+    Возвращает имя первого invalid поля или None если всё OK.
+    Pass-through:
+      - отсутствующее/пустое значение (caller отвечает за required-field check),
+      - не-числовое значение (трактуем как уже отформатированный datetime —
+        downstream INSERT отбьёт если формат битый).
+
+    Reject:
+      - числовое значение < min_timestamp (битый payload, action_date=0 и т.п.).
+    """
+    if not transforms:
+        return None
+    for field, transform_type in transforms.items():
+        if transform_type != "unix_timestamp":
+            continue
+        value = data.get(field)
+        if value is None or value == "":
+            continue
+        try:
+            ts = float(value)
+        except (TypeError, ValueError):
+            continue
+        if ts < min_timestamp:
+            return field
+    return None
+
+
+def _push_validation_failure_to_dlq(raw_message: str, reason: str) -> None:
+    """Best-effort lpush to DLQ с annotation `_dlq_error=<reason>`.
+
+    Acquires свою redis-conn (validation-failures редкие, перф некритичен).
+    Никогда не raise — DLQ telemetry не должна ронять основной flow.
+    """
+    sanitized = _sanitize_for_dlq(raw_message)
+    try:
+        payload = json.loads(sanitized)
+        if isinstance(payload, dict):
+            payload["_dlq_error"] = reason
+            sanitized = json.dumps(payload, ensure_ascii=False, default=str)
+    except (ValueError, json.JSONDecodeError):
+        pass
+    try:
+        r = get_redis_conn()
+        r.lpush(DLQ_KEY, sanitized)
+        r.ltrim(DLQ_KEY, 0, DLQ_MAX_LEN)
+    except Exception:
+        logger.exception("DLQ push failed for validation reason=%s", reason)
+
+
 def process_message(raw_message: str) -> None:
     """Process a single webhook message."""
     try:
@@ -175,8 +240,28 @@ def process_message(raw_message: str) -> None:
     # 2. Apply field mapping
     mapped = apply_mapping(params, mapping)
 
-    # 2b. Apply field transforms (e.g. Unix timestamp -> datetime)
+    # 2b. Sanity-валидация unix_timestamp полей ДО transforms.
+    # Без этой проверки action_date=0 silently проходил через
+    # `_convert_unix_timestamp` как строка "0", INSERT падал на DATETIME, но
+    # webhook processing_status уже был установлен 'ok' до insert'а — деньги
+    # пропадали без алерта (F-S3-04). Маршрутизируем в DLQ для ручного разбора.
     field_transforms = network.get("field_transforms", {})
+    invalid_field = _validate_unix_timestamp_fields(mapped, field_transforms)
+    if invalid_field is not None:
+        update_webhook_processing_status(webhook_id, "error")
+        logger.warning(
+            "Webhook validation failed: %s=%r below MIN_UNIX_TIMESTAMP (%d), "
+            "webhook_id=%s slug=%s",
+            invalid_field, mapped.get(invalid_field), MIN_UNIX_TIMESTAMP,
+            webhook_id, slug,
+        )
+        PROCESSED_TOTAL.labels(result="validation_error").inc()
+        _push_validation_failure_to_dlq(
+            raw_message, f"unix_timestamp_below_min:{invalid_field}"
+        )
+        return
+
+    # 2c. Apply field transforms (e.g. Unix timestamp -> datetime)
     mapped = apply_field_transforms(mapped, field_transforms)
 
     # 3. Resolve order status
