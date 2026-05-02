@@ -18,3 +18,10 @@ docker-entrypoint*.sh text eol=lf
 *.jpg          binary
 *.gz           binary
 *.tar          binary
+
+# Тесты не нужны в production-артефактах (`git archive` / тарболы).
+# ВНИМАНИЕ: export-ignore НЕ работает для `git clone`/`git pull`.
+# Для прод-сервера, который тянет код через git pull, тесты исключаются
+# через `git sparse-checkout` — см. README.md.
+tests/             export-ignore
+postback/tests/    export-ignore
