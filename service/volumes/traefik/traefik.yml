@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════
-# Traefik v3 — Production Configuration
+# Traefik v3 — Optimized for low traffic (500–1000 req/day)
 # ═══════════════════════════════════════════
 
 entryPoints:
@@ -57,24 +57,30 @@ providers:
     filename: '/etc/traefik/config.yml'
     watch: true
 
-# Dashboard отключён в production
 api:
   dashboard: false
   insecure: false
 
+# ── Главный лог Traefik: stderr → Docker json-file (ротация 10m×3) ──
 log:
   level: WARN
   format: json
 
-accessLog:
-  filePath: /var/log/traefik/access.log
-  format: json
-  bufferingSize: 100
-  filters:
-    statusCodes:
-      - '400-599'
-    retryAttempts: true
-    minDuration: '500ms'
+# ── ИЗМЕНЕНИЕ: accessLog отключён по умолчанию ──
+# В минорной нагрузке (1k req/day) hit-by-hit access-log даёт I/O без пользы.
+# Диагностика: Traefik 4xx/5xx и так попадают в основной log (level=WARN+).
+# Если временно нужен accessLog (например — расследование инцидента),
+# раскомментировать блок ниже и сделать `docker compose restart traefik`.
+#
+# accessLog:
+#   filePath: /var/log/traefik/access.log
+#   format: json
+#   bufferingSize: 100
+#   filters:
+#     statusCodes:
+#       - '500-599'      # сократил до 5xx — 4xx обычно noise (404 от ботов и т.п.)
+#     retryAttempts: true
+#     minDuration: '1s'   # повышен порог — фильтрует только реально медленные
 
 certificatesResolvers:
   letsencrypt:
@@ -84,6 +90,5 @@ certificatesResolvers:
       httpChallenge:
         entryPoint: web
 
-# Пинг для healthcheck
 ping:
   entryPoint: ping

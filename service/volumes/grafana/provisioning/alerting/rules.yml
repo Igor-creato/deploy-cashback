@@ -163,7 +163,9 @@ groups:
             relativeTimeRange: { from: 600, to: 0 }
             datasourceUid: victoriametrics-uid
             model:
-              expr: time() - container_last_seen{name=~"nginx|wordpress|mariadb|traefik|redis|modsecurity|crowdsec|grafana|victoriametrics|cadvisor|node-exporter|victorialogs|vector|mysqld-exporter|redis-exporter|php-fpm-exporter|webhook-receiver|webhook-admin|webhook-worker"}
+              # Optimization 2026-05-02: убраны crowdsec/victorialogs/vector/redis-exporter/php-fpm-exporter
+              # (отключены ради снижения disk I/O — см. INFRA OPTIMIZE 2026-05-02 commit).
+              expr: time() - container_last_seen{name=~"nginx|wordpress|mariadb|traefik|redis|modsecurity|grafana|victoriametrics|cadvisor|node-exporter|mysqld-exporter|webhook-receiver|webhook-admin|webhook-worker"}
               instant: true
           - refId: C
             datasourceUid: '__expr__'
@@ -280,51 +282,16 @@ groups:
         annotations:
           summary: 'MariaDB: >1 slow query/sec — нужен индекс или N+1'
 
-      - uid: redis-mem
-        title: 'Redis memory >90%'
-        condition: C
-        data:
-          - refId: A
-            relativeTimeRange: { from: 600, to: 0 }
-            datasourceUid: victoriametrics-uid
-            model:
-              expr: redis_memory_used_bytes / redis_memory_max_bytes
-              instant: true
-          - refId: C
-            datasourceUid: '__expr__'
-            model:
-              expression: A
-              conditions:
-                - evaluator: { type: gt, params: [0.9] }
-                  reducer: { type: last }
-              type: threshold
-        for: 5m
-        labels: { severity: warning }
-        annotations:
-          summary: 'Redis: >90% maxmemory, начнётся LRU вытеснение'
-
-      - uid: php-fpm-saturation
-        title: 'PHP-FPM pool saturated'
-        condition: C
-        data:
-          - refId: A
-            relativeTimeRange: { from: 600, to: 0 }
-            datasourceUid: victoriametrics-uid
-            model:
-              expr: phpfpm_processes_active / phpfpm_processes_total
-              instant: true
-          - refId: C
-            datasourceUid: '__expr__'
-            model:
-              expression: A
-              conditions:
-                - evaluator: { type: gt, params: [0.85] }
-                  reducer: { type: last }
-              type: threshold
-        for: 5m
-        labels: { severity: warning }
-        annotations:
-          summary: 'PHP-FPM: >85% воркеров заняты — скоро 502'
+      # ── УДАЛЕНО (INFRA OPTIMIZE 2026-05-02) ──
+      # uid: redis-mem — требовал redis-exporter, выключен ради снижения I/O.
+      # Прокси: Redis OOM видно через container_memory_working_set_bytes
+      # (есть в container-mem-pressure выше). При возврате redis-exporter
+      # вернуть и этот алерт.
+      #
+      # uid: php-fpm-saturation — требовал php-fpm-exporter, выключен.
+      # Прокси: saturation видно через nginx 502 (ratio в nginx access log
+      # отсутствует после отключения access-log; при необходимости добавить
+      # http_requests_total{status="502"} с собственного экспортёра).
 
       - uid: dlq-large
         title: 'Webhook DLQ >100 messages'

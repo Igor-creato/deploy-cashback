@@ -1,4 +1,9 @@
 services:
+  # ═══════════════════════════════════════════
+  # webhook-receiver
+  # ── access-log уже выключен (--no-access-log) — корректно: token в URL.
+  #    Логи идут в stdout, json-file драйвер с ротацией 10m × 3.
+  # ═══════════════════════════════════════════
   app-receiver:
     build: .
     image: app-custom:latest
@@ -18,7 +23,6 @@ services:
       - TZ=UTC
     volumes:
       - app_data:/data
-    # --no-access-log: webhook URL contains a secret token in the path; access log would leak it.
     command: python -m uvicorn app.receiver:app --host 0.0.0.0 --port 8099 --workers 2 --log-level warning --no-access-log
     labels:
       - traefik.enable=true
@@ -40,6 +44,11 @@ services:
       retries: 3
       start_period: 20s
 
+  # ═══════════════════════════════════════════
+  # webhook-admin
+  # ── ИЗМЕНЕНИЕ: --log-level info → warning (admin доступен только
+  #    через SSH-туннель, info-уровень избыточен).
+  # ═══════════════════════════════════════════
   app-admin:
     image: app-custom:latest
     container_name: webhook-admin
@@ -55,7 +64,7 @@ services:
         max-size: '10m'
         max-file: '3'
     ports:
-      - '127.0.0.1:8098:8098' # Admin UI (localhost only via SSH)
+      - '127.0.0.1:8098:8098'
     environment:
       - REDIS_URL=redis://redis:6379/1
       - CONFIG_PATH=/data/config.json
@@ -64,7 +73,7 @@ services:
       - TZ=UTC
     volumes:
       - app_data:/data
-    command: python -m uvicorn admin.panel:app --host 0.0.0.0 --port 8098 --workers 1 --log-level info
+    command: python -m uvicorn admin.panel:app --host 0.0.0.0 --port 8098 --workers 1 --log-level warning --no-access-log
     healthcheck:
       test: ['CMD-SHELL', 'wget -q -O /dev/null http://localhost:8098/health || exit 1']
       interval: 30s
@@ -75,6 +84,10 @@ services:
       - internal
       - db-shared
 
+  # ═══════════════════════════════════════════
+  # webhook-worker
+  # ── Без изменений по логике, только унификация logging.
+  # ═══════════════════════════════════════════
   worker:
     image: app-custom:latest
     container_name: webhook-worker
@@ -96,10 +109,6 @@ services:
       - TZ=UTC
       - SMTP_PASSWORD_FILE=/run/secrets/smtp_password
     env_file:
-      # SMTP settings + DOMAIN (shared with WordPress site).
-      # Путь задаётся в .env через SMTP_ENV_FILE (install.sh спросит и пропишет).
-      # Дефолт — гарантированно несуществующий путь: при required:false compose
-      # молча пропустит, не утекая чужой путь, если переменная не задана.
       - path: ${SMTP_ENV_FILE:-/var/empty/smtp-env-not-configured}
         required: false
     secrets:
@@ -117,6 +126,7 @@ services:
     networks:
       - db-shared
       - internal
+
 networks:
   proxy:
     external: true
@@ -130,7 +140,4 @@ volumes:
 
 secrets:
   smtp_password:
-    # Путь задаётся в .env через SMTP_ENV_FILE_HOST (install.sh пропишет).
-    # Дефолт — заведомо несуществующий: worker не стартует с внятной ошибкой,
-    # вместо тихой отправки без авторизации.
     file: ${SMTP_PASSWORD_FILE_HOST:-/var/empty/smtp-password-not-configured}

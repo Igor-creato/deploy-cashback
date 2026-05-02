@@ -1,5 +1,8 @@
 global:
-  scrape_interval: 30s
+  # Реже опрос — для 1k req/day метрики каждые 30s излишни.
+  # 60s даёт 2× меньше точек при той же видимости трендов.
+  scrape_interval: 60s
+  scrape_timeout: 10s
 
 scrape_configs:
   - job_name: node
@@ -9,10 +12,13 @@ scrape_configs:
   - job_name: cadvisor
     static_configs:
       - targets: ['cadvisor:8080']
-
     metric_relabel_configs:
       - action: labeldrop
         regex: 'container_label_traefik.*|container_label_org_opencontainers.*|container_label_maintainer'
+      # Дроп контейнеров pause/k8s, если когда-то появятся
+      - source_labels: [container_label_io_kubernetes_container_name]
+        action: drop
+        regex: '.+'
 
   - job_name: victoriametrics
     static_configs:
@@ -22,14 +28,11 @@ scrape_configs:
     static_configs:
       - targets: ['mysqld-exporter:9104']
 
-  - job_name: redis
-    static_configs:
-      - targets: ['redis-exporter:9121']
+  # ── УБРАНЫ: redis-exporter, php-fpm-exporter (выкл. в compose) ──
+  # - job_name: redis
+  # - job_name: php-fpm
 
-  - job_name: php-fpm
-    static_configs:
-      - targets: ['php-fpm-exporter:9253']
-
+  # webhook-worker экспортирует custom-метрики (DLQ size, processed count)
   - job_name: webhook-worker
     static_configs:
       - targets: ['webhook-worker:9100']

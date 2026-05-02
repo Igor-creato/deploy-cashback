@@ -1,0 +1,45 @@
+# ═══════════════════════════════════════════════════════════════
+# MariaDB — disk I/O minimisation для single-VPS
+# Положить как ./volumes/mariadb/conf.d/optimize.cnf и:
+#   docker compose restart mariadb
+# ═══════════════════════════════════════════════════════════════
+
+[mysqld]
+# ── Binary log ──
+# На single-instance без репликации binlog не нужен и пишет на каждый
+# write-запрос. Отключение = крупная экономия I/O.
+# Если используется PITR — вернуть с expire_logs_days=2.
+skip-log-bin
+
+# ── Slow query log ──
+# Через mysqld-exporter мы и так получаем slow_queries counter.
+# Файл-лог только нагружает диск.
+slow_query_log = 0
+
+# ── General log ──
+general_log = 0
+
+# ── InnoDB ──
+# Flush log не на каждый commit — для не-критичных финданных безопасно;
+# теряется максимум 1 секунда транзакций при крэше OS (не процесса!).
+# Если допустимости НЕ ТЕРЯТЬ ни одной — оставить значение по умолчанию (1).
+innodb_flush_log_at_trx_commit = 2
+
+# Размер redo log — для 1k req/day хватает 64M (default 96M иногда меньше).
+# Реже flush-чекпоинты = меньше I/O.
+innodb_log_file_size = 128M
+innodb_log_buffer_size = 16M
+
+# Buffer pool — должен быть ~50–60% от mem_limit контейнера (1536m → 800–900M).
+innodb_buffer_pool_size = 768M
+
+# Direct I/O — снимает дублирование между MariaDB и OS page cache.
+# На NVMe shared disk даёт стабильнее latency.
+innodb_flush_method = O_DIRECT
+
+# Меньше I/O на статистику
+innodb_stats_persistent = ON
+innodb_stats_persistent_sample_pages = 20
+
+# ── Performance schema — выключаем, если не используется в Grafana ──
+performance_schema = OFF

@@ -1,0 +1,56 @@
+# ═══════════════════════════════════════════════════════════════
+# /etc/logrotate.d/cashback
+# Установить как:
+#   sudo cp service/logrotate/cashback /etc/logrotate.d/cashback
+#   sudo chmod 644 /etc/logrotate.d/cashback
+#   sudo logrotate -d /etc/logrotate.d/cashback   # debug-проверка
+#
+# Покрывает:
+#   1. Docker container json-логи (страховка к max-size в compose).
+#   2. Бэкапы / kernel-логи WordPress wp-content/debug.log если включён.
+#
+# Все файлы Nginx access/error и Traefik access НЕ ротируются здесь:
+#   они теперь идут в stdout контейнера (Docker json-file driver).
+# ═══════════════════════════════════════════════════════════════
+
+# ── Docker container logs ──
+# Docker json-file драйвер УЖЕ ротирует по max-size=10m / max-file=3.
+# Этот блок — страховка на случай stale-файлов (контейнер удалён, лог остался).
+# copytruncate чтобы не SIGHUPать Docker daemon.
+/var/lib/docker/containers/*/*-json.log {
+    daily
+    rotate 3
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    nodateext
+    su root root
+}
+
+# ── WordPress debug.log ──
+# Активен только когда WP_DEBUG_ENABLE=1 в cashback.env.
+# В production должен быть выключен; ротация — на случай временного включения.
+/var/www/html/wp-content/debug.log
+/srv/cashback/service/volumes/wordpress/wp-content/debug.log {
+    daily
+    rotate 3
+    compress
+    missingok
+    notifempty
+    copytruncate
+    nocreate
+    su root root
+}
+
+# ── Backup logs (если backup-all.sh пишет в файл) ──
+/var/log/cashback-backup.log {
+    weekly
+    rotate 4
+    compress
+    missingok
+    notifempty
+    copytruncate
+    su root root
+}
