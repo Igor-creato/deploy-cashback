@@ -29,6 +29,18 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
+# Защита от случайных --флагов: скрипт не принимает опции, только путь.
+# Без этого `--check` или `--help` интерпретировались как WP_ROOT, и dirname
+# падал на минусы → WP_ROOT превращался в текущий PWD ($HOME), и chown -R 33:33
+# уносил в /home/USER всё подряд (включая ~/.ssh — потеря SSH-доступа).
+if [[ "${1:-}" == --* ]]; then
+  err "Неизвестный флаг: $1"
+  err "Скрипт не принимает опции. Использование:"
+  err "  sudo bash $(basename "$0")              # WP_ROOT по умолчанию"
+  err "  sudo bash $(basename "$0") /path/to/wp  # явный путь"
+  exit 1
+fi
+
 # REAL_USER_OVERRIDE имеет приоритет над SUDO_USER (нужно для restore-all.sh).
 REAL_USER="${REAL_USER_OVERRIDE:-${SUDO_USER:-root}}"
 REAL_GROUP="$(id -gn "$REAL_USER" 2>/dev/null || echo "root")"
@@ -48,6 +60,28 @@ if [[ -z "${DEPLOY_USER:-}" ]]; then
 fi
 WP_ROOT="${1:-${WP_ROOT:-${SCRIPT_DIR}/../volumes/wordpress}}"
 WP_ROOT="$(cd "$(dirname "$WP_ROOT")" 2>/dev/null && pwd)/$(basename "$WP_ROOT")" || true
+
+# ─── Sanity guard: запрет разрушительных целей ──────────────
+# Скрипт делает chown -R 33:33 + chmod -R на весь WP_ROOT. Если случайно
+# WP_ROOT окажется системным каталогом ($HOME, /, /home, /root, /etc, /var,
+# /usr, /tmp), это уничтожит права всему что внутри. Лучше отказать сразу.
+case "$WP_ROOT" in
+  ""|"/"|"/home"|"/home/"|"/root"|"/root/"|"/etc"|"/etc/"|"/var"|"/var/"|"/usr"|"/usr/"|"/tmp"|"/tmp/"|"/opt"|"/opt/")
+    err "WP_ROOT=${WP_ROOT} — системный/корневой путь, запуск запрещён"
+    exit 1
+    ;;
+esac
+# Запрет на $HOME пользователя (любого) — типичная мишень случайной аварии.
+if [[ "$WP_ROOT" == "$HOME" || "$WP_ROOT" == "$HOME/" ]]; then
+  err "WP_ROOT=${WP_ROOT} совпадает с \$HOME — запуск запрещён"
+  exit 1
+fi
+# Запрет если внутри есть характерные не-WP файлы (signs of homedir).
+if [[ -e "$WP_ROOT/.ssh" || -e "$WP_ROOT/.bashrc" || -e "$WP_ROOT/.bash_history" ]]; then
+  err "WP_ROOT=${WP_ROOT} содержит home-dir файлы (.ssh/.bashrc/.bash_history)"
+  err "Отказ — это явно не каталог WordPress"
+  exit 1
+fi
 
 info "WP_ROOT     = ${WP_ROOT}"
 info "REAL_USER   = ${REAL_USER} (${REAL_GROUP})"
