@@ -35,15 +35,14 @@ $count = (int) ( getenv( 'LOADTEST_CLICK_COUNT' ) ?: 200 );
 WP_CLI::log( "Seeding {$count} loadtest clicks…" );
 
 /**
- * UUID v7-ish: timestamp_ms (48 bit) + random (80 bit), hex without dashes.
- * 32 hex chars to match CHAR(32) ascii_bin schema of click_log.click_id.
+ * UUID v7-ish: 12 hex (timestamp_ms) + 1 ('7' version) + 3 (rand_a) + 16 (rand_b) = 32 hex.
+ * Соответствует CHAR(32) ascii_bin схеме click_log.click_id.
  */
 function loadtest_uuid7_hex(): string {
-	$ts = (int) ( microtime( true ) * 1000 );
+	$ts     = (int) ( microtime( true ) * 1000 );
 	$ts_hex = str_pad( dechex( $ts ), 12, '0', STR_PAD_LEFT );
-	$rand = bin2hex( random_bytes( 10 ) );
-	// version 7 nibble
-	return $ts_hex . '7' . substr( $rand, 0, 3 ) . substr( $rand, 3 );
+	$rand   = bin2hex( random_bytes( 10 ) ); // 20 hex
+	return $ts_hex . '7' . substr( $rand, 0, 3 ) . substr( $rand, 3, 16 );
 }
 
 $manifest = array();

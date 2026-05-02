@@ -7,7 +7,7 @@
 import http from 'k6/http';
 import { check } from 'k6';
 import { cfg } from './config.js';
-import { signBody, uniqId } from './hmac.js';
+import { signBody, signQueryRaw, uniqId } from './hmac.js';
 import { pickClick } from './data.js';
 
 const URL_BASE = () => `${cfg.webhookUrl}/${cfg.networkSlug}/${cfg.webhookSecretPath}`;
@@ -41,27 +41,36 @@ export function buildValidPayload(overrides = {}) {
 }
 
 /**
- * Отправить webhook. Возвращает k6 Response.
+ * Отправить webhook. Метод (GET/POST) — из cfg.webhookMethod.
+ * GET: query string; POST: JSON body. HMAC подпись добавляется если cfg.hmacSecret задан.
  */
 export function sendWebhook(payload, opts = {}) {
-  const body = JSON.stringify(payload);
-  const headers = {
-    'Content-Type': 'application/json',
-    'User-Agent': cfg.userAgent,
-  };
+  const url = opts.url || URL_BASE();
+  const method = (opts.method || cfg.webhookMethod || 'POST').toUpperCase();
+  const headers = { 'User-Agent': cfg.userAgent };
+  const tags = { name: 'webhook', endpoint: opts.tag || 'valid' };
 
-  // HMAC-подпись (если в env есть секрет — подписываем).
-  if (cfg.hmacSecret) {
-    headers['X-Signature'] = opts.badSignature
-      ? signBody(cfg.hmacSecret + 'wrong', body)  // намеренно битая
-      : signBody(cfg.hmacSecret, body);
+  if (method === 'GET') {
+    const qs = Object.entries(payload)
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+      .join('&');
+    if (cfg.hmacSecret) {
+      headers['X-Signature'] = opts.badSignature
+        ? signQueryRaw(cfg.hmacSecret + 'wrong', qs)
+        : signQueryRaw(cfg.hmacSecret, qs);
+    }
+    return http.get(`${url}?${qs}`, { headers, tags });
   }
 
-  const url = opts.url || URL_BASE();
-  return http.post(url, body, {
-    headers,
-    tags: { name: 'webhook', endpoint: opts.tag || 'valid' },
-  });
+  // POST
+  const body = JSON.stringify(payload);
+  headers['Content-Type'] = 'application/json';
+  if (cfg.hmacSecret) {
+    headers['X-Signature'] = opts.badSignature
+      ? signBody(cfg.hmacSecret + 'wrong', body)
+      : signBody(cfg.hmacSecret, body);
+  }
+  return http.post(url, body, { headers, tags });
 }
 
 export function expectStatus(r, expected, label) {

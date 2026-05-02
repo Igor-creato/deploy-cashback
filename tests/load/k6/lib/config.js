@@ -18,6 +18,7 @@ export const cfg = {
   networkSlug: optional('NETWORK_SLUG', ''),
   webhookSecretPath: optional('WEBHOOK_SECRET_PATH', ''),
   hmacSecret: optional('HMAC_SECRET', ''),
+  webhookMethod: optional('WEBHOOK_METHOD', 'POST').toUpperCase(),
 
   // имена пользователей/товаров для рандомного выбора
   userCount: parseInt(optional('LOADTEST_USER_COUNT', '200'), 10),
