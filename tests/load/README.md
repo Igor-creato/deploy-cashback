@@ -2,6 +2,9 @@
 
 Нагрузочное тестирование стенда (WordPress + WooCommerce + кэшбэк-плагин + Python postback) с целью калибровки конфига под прод-профиль **4 CPU / 8 ГБ RAM / 80 ГБ NVMe / 1 Гбит/с**.
 
+📊 **Итоговый вердикт первого цикла (2026-05-02): см. [VERDICT.md](VERDICT.md).**
+TL;DR: прод-цель 1000 UV/сутки + 1000 webhooks/сутки покрывается с **5× запасом** на финальном конфиге (`pm.max_children=16`, OPcache `validate_timestamps=0`).
+
 Полный план — см. `C:\Users\User\.claude\plans\groovy-fluttering-dongarra.md`.
 
 ## TL;DR
