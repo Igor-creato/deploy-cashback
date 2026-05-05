@@ -344,6 +344,12 @@ if [[ "$REAL_USER" != "root" ]]; then
   chown -R "${REAL_USER}:${REAL_GROUP}" "$INSTALL_DIR/volumes/php-config"
   chown -R "${REAL_USER}:${REAL_GROUP}" "$INSTALL_DIR/volumes/traefik"
   chown -R "${REAL_USER}:${REAL_GROUP}" "$INSTALL_DIR/volumes/crowdsec"
+  # volumes/grafana/{provisioning,dashboards} монтируются в контейнер как :ro,
+  # поэтому Grafana не меняет owner. Но если установка случайно прошла под
+  # другим user'ом, future `git pull` ломается на unlink при обновлении
+  # provisioning/alerting/rules.yml. Явный chown страхует от этого
+  # (идемпотентно, не вредит уже корректным установкам).
+  chown -R "${REAL_USER}:${REAL_GROUP}" "$INSTALL_DIR/volumes/grafana"
   chown "${REAL_USER}:${REAL_GROUP}" "$INSTALL_DIR/docker-compose.yml" 2>/dev/null || true
   chown "${REAL_USER}:${REAL_GROUP}" "$INSTALL_DIR/scripts/backup.sh" 2>/dev/null || true
   log "Владелец файлов: ${REAL_USER}:${REAL_GROUP}"
