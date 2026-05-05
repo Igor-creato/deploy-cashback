@@ -282,16 +282,64 @@ groups:
         annotations:
           summary: 'MariaDB: >1 slow query/sec — нужен индекс или N+1'
 
-      # ── УДАЛЕНО (INFRA OPTIMIZE 2026-05-02) ──
-      # uid: redis-mem — требовал redis-exporter, выключен ради снижения I/O.
-      # Прокси: Redis OOM видно через container_memory_working_set_bytes
-      # (есть в container-mem-pressure выше). При возврате redis-exporter
-      # вернуть и этот алерт.
-      #
-      # uid: php-fpm-saturation — требовал php-fpm-exporter, выключен.
-      # Прокси: saturation видно через nginx 502 (ratio в nginx access log
-      # отсутствует после отключения access-log; при необходимости добавить
-      # http_requests_total{status="502"} с собственного экспортёра).
+      # ── PAUSED (INFRA OPTIMIZE 2026-05-02 / fix 2026-05-05) ──
+      # redis-exporter и php-fpm-exporter отключены ради снижения I/O,
+      # но правила нельзя просто удалить из YAML — Grafana provisioning
+      # не вычищает их из SQLite-БД, и они начинают слать DatasourceNoData.
+      # Решение: оставляем правила с isPaused: true. При возврате exporter'ов
+      # достаточно убрать isPaused и вернуть proper expr.
+      # Прокси на сейчас:
+      #   redis-mem          → container-mem-pressure (working_set / limit)
+      #   php-fpm-saturation → nginx 502 ratio (когда добавим http_requests_total)
+      - uid: redis-mem
+        title: 'Redis memory >90%'
+        condition: C
+        isPaused: true
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: victoriametrics-uid
+            model:
+              expr: redis_memory_used_bytes / redis_memory_max_bytes
+              instant: true
+          - refId: C
+            datasourceUid: '__expr__'
+            model:
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0.9] }
+                  reducer: { type: last }
+              type: threshold
+        for: 5m
+        noDataState: OK
+        labels: { severity: warning }
+        annotations:
+          summary: 'Redis: >90% maxmemory, начнётся LRU вытеснение'
+
+      - uid: php-fpm-saturation
+        title: 'PHP-FPM pool saturated'
+        condition: C
+        isPaused: true
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: victoriametrics-uid
+            model:
+              expr: phpfpm_active_processes / phpfpm_total_processes
+              instant: true
+          - refId: C
+            datasourceUid: '__expr__'
+            model:
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0.85] }
+                  reducer: { type: last }
+              type: threshold
+        for: 5m
+        noDataState: OK
+        labels: { severity: warning }
+        annotations:
+          summary: 'PHP-FPM: >85% воркеров заняты — скоро 502'
 
       - uid: dlq-large
         title: 'Webhook DLQ >100 messages'
