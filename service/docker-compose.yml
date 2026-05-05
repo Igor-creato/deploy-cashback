@@ -179,6 +179,10 @@ services:
     restart: always
     mem_limit: 1536m
     mem_reservation: 512m
+    # TEMP DIAG 2026-05-05: SYS_PTRACE для php-fpm slowlog backtrace.
+    # ОТКАТИТЬ вместе с www.conf slowlog после диагностики.
+    cap_add:
+      - SYS_PTRACE
     depends_on:
       mariadb:
         condition: service_healthy
