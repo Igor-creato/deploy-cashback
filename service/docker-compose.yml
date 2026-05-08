@@ -433,14 +433,20 @@ services:
     environment:
       - DOCKER_API_VERSION=1.44
     # F-S1-003: unprivileged. `privileged: true` снимало все capability-ограничения
-    # → host-RCE при CVE в cAdvisor. Минимально необходимый набор: SYS_PTRACE для
-    # process introspection, /dev/kmsg для kernel events. containerd.sock mount
-    # удалён — `--docker_only=true` использует только docker.sock.
+    # → host-RCE при CVE в cAdvisor. Минимально необходимый набор:
+    #   SYS_PTRACE — process introspection cgroups
+    #   DAC_READ_SEARCH — чтение root-owned /var/lib/docker файлов
+    #   SYSLOG — чтение /dev/kmsg для OOM events
+    # Все volumes остаются :ro (без write attack surface).
+    # containerd.sock тоже :ro — но он необходим, modern Docker (Docker 19.03+)
+    # использует containerd как backend, и cAdvisor дотягивается до runtime
+    # API именно через containerd.sock; docker.sock сам по себе недостаточен.
     cap_drop:
       - ALL
     cap_add:
       - SYS_PTRACE
       - DAC_READ_SEARCH
+      - SYSLOG
     security_opt:
       - no-new-privileges:true
     devices:
@@ -448,6 +454,7 @@ services:
     volumes:
       - /:/rootfs:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /run/containerd/containerd.sock:/run/containerd/containerd.sock:ro
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
       - /dev/disk/:/dev/disk:ro
