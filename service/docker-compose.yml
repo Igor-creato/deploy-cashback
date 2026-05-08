@@ -23,7 +23,9 @@ services:
   # Docker Socket Proxy
   # ═══════════════════════════════════════════
   docker-socket-proxy:
-    image: tecnativa/docker-socket-proxy:v0.4.2
+    # F-S1-004: pinned by digest. Tag immutability protection — обновлять
+    # через `docker pull <tag>` затем заменить digest здесь.
+    image: tecnativa/docker-socket-proxy:v0.4.2@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
     container_name: docker-socket-proxy
     restart: always
     mem_limit: 64m
@@ -60,7 +62,7 @@ services:
   #    не наполняется — нет I/O. Healthchecks/error.log идут в stdout.
   # ═══════════════════════════════════════════
   traefik:
-    image: traefik:v3.6.14
+    image: traefik:v3.6.14@sha256:4cda3393930dceff030e144b46260e96e1337c9cfaa4fed81c90cb8f4d498f57
     container_name: traefik
     restart: always
     mem_limit: 256m
@@ -99,7 +101,7 @@ services:
   #    binlog write на каждый INSERT/UPDATE — крупная экономия I/O.
   # ═══════════════════════════════════════════
   mariadb:
-    image: mariadb:11.8
+    image: mariadb:11.8@sha256:78a5047d3ba33975f183f183c2464cc7f1eab13ec8667e57cc9a5821d6da7577
     container_name: mariadb
     restart: always
     mem_limit: 1536m
@@ -136,7 +138,7 @@ services:
   # ── Без изменений по командам (AOF + everysec корректно для финданных).
   # ═══════════════════════════════════════════
   redis:
-    image: redis:8.6.2-alpine
+    image: redis:8.6.2-alpine@sha256:c5e375abb885e6b2021c0377879e4890bf76f9065b8922ffc113f2b226b9fc17
     container_name: redis
     restart: always
     mem_limit: 320m
@@ -254,7 +256,7 @@ services:
   #    ~1–5 МБ логов/сутки с гарантированной ротацией.
   # ═══════════════════════════════════════════
   modsecurity:
-    image: owasp/modsecurity-crs:4.25.0-nginx-alpine-202604040104
+    image: owasp/modsecurity-crs:4.25.0-nginx-alpine-202604040104@sha256:f7ebbff3739ad03cff3062537543129598f94ab304ed19b895e20ddf14e1e1da
     container_name: modsecurity
     restart: always
     mem_limit: 384m
@@ -344,7 +346,7 @@ services:
   #    - Volume nginx-logs больше НЕ нужен (удалён из volumes).
   # ═══════════════════════════════════════════
   nginx:
-    image: nginx:1.28.2-alpine
+    image: nginx:1.28.2-alpine@sha256:5b4900b042ccfa8b0a73df622c3a60f2322faeb2be800cbee5aa7b44d241649e
     container_name: nginx
     restart: always
     mem_limit: 256m
@@ -374,7 +376,7 @@ services:
   # node-exporter — host metrics, обязательно для алертов диск/RAM
   # ═══════════════════════════════════════════
   node-exporter:
-    image: prom/node-exporter:v1.11.1
+    image: prom/node-exporter:v1.11.1@sha256:e9cff4fc67b1818f8c97adb115b9f12c9a54b533de86765d4a0effc01b357205
     container_name: node-exporter
     restart: unless-stopped
     mem_limit: 128m
@@ -413,7 +415,7 @@ services:
   #    Остальные метрики уже отключены оригинальным конфигом.
   # ═══════════════════════════════════════════
   cadvisor:
-    image: gcr.io/cadvisor/cadvisor:v0.55.1
+    image: gcr.io/cadvisor/cadvisor:v0.55.1@sha256:3de2bd5203120b866d74a9b283b2ffb8ec382fbf9dc321814700c6ea6f44ec57
     container_name: cadvisor
     restart: unless-stopped
     mem_limit: 512m
@@ -466,7 +468,7 @@ services:
   # mysqld-exporter — оставлен (slow query / connections важны)
   # ═══════════════════════════════════════════
   mysqld-exporter:
-    image: prom/mysqld-exporter:v0.19.0
+    image: prom/mysqld-exporter:v0.19.0@sha256:eacb4b18e2ec1e0abdf2d64851b68526c964f6d9cb3e9458fb5d5f5062ea94c1
     container_name: mysqld-exporter
     restart: unless-stopped
     mem_limit: 64m
@@ -505,7 +507,7 @@ services:
   #    Дополнительно: --search.maxLookback ограничивает RAM.
   # ═══════════════════════════════════════════
   victoriametrics:
-    image: victoriametrics/victoria-metrics:v1.140.0
+    image: victoriametrics/victoria-metrics:v1.140.0@sha256:5ea06e3a567249f8a23181208755f36dabd3b515f7023e9eb570fd4ae6c29203
     container_name: victoriametrics
     restart: unless-stopped
     mem_limit: 768m
@@ -547,7 +549,7 @@ services:
   # ── Убран victoriametrics-logs-datasource (VictoriaLogs больше нет).
   # ═══════════════════════════════════════════
   grafana:
-    image: grafana/grafana:12.4.1
+    image: grafana/grafana:12.4.1@sha256:e932bd6ed0e026595b08483cd0141e5103e1ab7ff8604839ff899b8dc54cabcb
     container_name: grafana
     restart: unless-stopped
     # PID 1 в grafana/grafana — это `grafana server` (Go-бинарь), который не

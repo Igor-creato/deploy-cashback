@@ -72,7 +72,20 @@ end
 return current
 """
 _LOGIN_RL_PREFIX = "admin:rl:login:"
-_LOGIN_RL_MAX_FAILS = 10  # 10 попыток за 15 минут per IP
+_LOGIN_RL_MAX_FAILS = 10  # 10 попыток за 15 минут per (IP+UA-bucket)
+
+
+# F-S1-007: per-IP rate-limit бесполезен через SSH-туннель — все запросы
+# приходят с client_ip = "127.0.0.1". Расширяем bucket до (IP, UA-hash):
+# разные браузеры/CLI получают разные счётчики, что даёт защиту от
+# одновременных компрометированных коллизий, не блокируя легитимного
+# админа другим клиентом. Pattern совпадает с двухуровневым rate-limit
+# плагина (см. memory: feedback_nat_safe_rate_limit, NAT-safe per-IP+UA).
+def _client_bucket(request: Request) -> str:
+    ip = request.client.host if request.client else "unknown"
+    ua = request.headers.get("user-agent", "") or ""
+    ua_hash = hashlib.sha256(ua.encode("utf-8")).hexdigest()[:16]
+    return f"{ip}:{ua_hash}"
 
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
@@ -131,22 +144,25 @@ def _get_redis():
     return redis.from_url(REDIS_URL, decode_responses=True)
 
 
-def _login_rl_peek(client_ip: str) -> int:
-    """Текущее число неудачных попыток с IP за окно (без инкремента)."""
+def _login_rl_peek(bucket: str) -> int:
+    """Текущее число неудачных попыток с bucket'а за окно (без инкремента).
+
+    bucket = "<ip>:<ua_hash>" (см. _client_bucket).
+    """
     try:
         r = _get_redis()
-        v = r.get(f"{_LOGIN_RL_PREFIX}{client_ip}")
+        v = r.get(f"{_LOGIN_RL_PREFIX}{bucket}")
         return int(v) if v else 0
     except Exception:
         logger.exception("login rate-limit peek failed")
         return 0
 
 
-def _login_rl_increment(client_ip: str) -> int:
-    """Инкрементирует счётчик неудач (атомарно с TTL=15min)."""
+def _login_rl_increment(bucket: str) -> int:
+    """Инкрементирует счётчик неудач bucket'а (атомарно с TTL=15min)."""
     try:
         r = _get_redis()
-        return int(r.eval(_LOGIN_RL_LUA, 1, f"{_LOGIN_RL_PREFIX}{client_ip}"))
+        return int(r.eval(_LOGIN_RL_LUA, 1, f"{_LOGIN_RL_PREFIX}{bucket}"))
     except Exception:
         logger.exception("login rate-limit increment failed")
         return 0
@@ -175,6 +191,7 @@ async def root(request: Request, whk_session: str | None = Cookie(None)):
 @app.post("/login")
 async def login(request: Request, password: str = Form(...)):
     client_ip = request.client.host if request.client else "unknown"
+    bucket = _client_bucket(request)
 
     # CSRF: /login не проходит через _require_auth, поэтому Origin-check
     # делаем явно. Для CLI без Origin/Referer — отвергаем, чтобы случайный
@@ -187,9 +204,9 @@ async def login(request: Request, password: str = Form(...)):
         raise HTTPException(status_code=403, detail="bad origin")
 
     # Сначала peek счётчик; если уже превышен — отвергаем без проверки пароля.
-    fails = _login_rl_peek(client_ip)
+    fails = _login_rl_peek(bucket)
     if fails >= _LOGIN_RL_MAX_FAILS:
-        logger.warning("admin login throttled for ip=%s (fails=%d)", client_ip, fails)
+        logger.warning("admin login throttled for bucket=%s (fails=%d)", bucket, fails)
         return PlainTextResponse("too many attempts, retry later", status_code=429)
 
     if hmac.compare_digest(password, ADMIN_SECRET):
@@ -208,8 +225,8 @@ async def login(request: Request, password: str = Form(...)):
         return resp
 
     # Неудача — инкрементируем счётчик и возвращаем форму.
-    new_fails = _login_rl_increment(client_ip)
-    logger.warning("admin login fail from ip=%s (fails=%d)", client_ip, new_fails)
+    new_fails = _login_rl_increment(bucket)
+    logger.warning("admin login fail from bucket=%s (fails=%d)", bucket, new_fails)
     return templates.TemplateResponse(request, "login.html", {"error": "Неверный пароль"})
 
 

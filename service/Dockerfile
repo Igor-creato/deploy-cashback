@@ -1,4 +1,6 @@
-FROM wordpress:6.9.4-php8.4-fpm
+# F-S1-004: digest-pinned. Update flow: `docker pull wordpress:6.9.4-php8.4-fpm`
+# затем подставить новый digest сюда.
+FROM wordpress:6.9.4-php8.4-fpm@sha256:de6aeca1df3cb9cafb9b5b99f6435a05ba7f7640cae01d3b032a312203c029c3
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     msmtp \

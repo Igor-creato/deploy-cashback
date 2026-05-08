@@ -1,4 +1,6 @@
-FROM python:3.13-slim
+# F-S1-004: digest-pinned. Update flow: `docker pull python:3.13-slim`
+# затем подставить новый digest сюда.
+FROM python:3.13-slim@sha256:a0779d7c12fc20be6ec6b4ddc901a4fd7657b8a6bc9def9d3fde89ed5efe0a3d
 
 WORKDIR /srv
 

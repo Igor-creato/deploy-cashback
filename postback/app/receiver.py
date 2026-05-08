@@ -27,6 +27,12 @@ logger = logging.getLogger("webhook.receiver")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 QUEUE_KEY = "webhook:queue"
 RATE_LIMIT_PREFIX = "webhook:rl:"
+# F-S1-009 defense-in-depth: per-IP лимит до per-slug. Защищает quota slug'а
+# от исчерпания одним атакующим, который скомпрометировал slug+secret.
+# 120/min — щедро для CPA-сетей (Admitad/EPN могут шлёт burst'ы), но
+# отлавливает любой single-source flood.
+RATE_LIMIT_IP_PREFIX = "webhook:rl:ip:"
+RATE_LIMIT_IP_MAX = 120  # req/min per IP (across all slugs)
 # Реальные постбэки CPA-сетей < 4 KB; 16 KB — щедрый запас. Защита от DoS:
 # attacker не может слить event loop чтением мегабайтного тела.
 MAX_PAYLOAD_BYTES = 16 * 1024
@@ -39,6 +45,20 @@ if current == 1 then
 end
 return current
 """
+
+
+def _client_ip(request: Request) -> str:
+    """Извлечь IP клиента CPA с учётом Traefik upstream.
+
+    Webhook receiver экспонируется только через Traefik (Host()-правило);
+    request.client.host = IP Traefik'а из docker-сети. Реальный IP CPA-сети
+    лежит в X-Forwarded-For. Берём первый IP (last-write-wins по spec).
+    Доверяем only-если есть header — Traefik всегда его выставляет.
+    """
+    fwd = request.headers.get("x-forwarded-for", "").strip()
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
 
 app = FastAPI(
     title="Webhook Receiver",
@@ -206,8 +226,19 @@ async def _handle_webhook(slug: str, secret: str, request: Request):
         return PlainTextResponse("payload too large", status_code=413)
 
     # Rate limiting (atomic: INCR + EXPIRE in single Lua script)
-    rate_limit = int(network.get("rate_limit", 200))
     r = await get_redis()
+
+    # F-S1-009 defense-in-depth: per-IP RL до per-slug. Закрывает риск
+    # single-attacker flood, выжигающего slug-quota (если он узнал secret).
+    ip = _client_ip(request)
+    if ip and ip != "unknown":
+        ip_key = f"{RATE_LIMIT_IP_PREFIX}{ip}"
+        ip_current = await r.eval(_RL_LUA, 1, ip_key)
+        if ip_current > RATE_LIMIT_IP_MAX:
+            logger.warning("Per-IP rate limit exceeded for ip=%s slug=%s", ip, slug)
+            return PlainTextResponse("rate limited", status_code=429)
+
+    rate_limit = int(network.get("rate_limit", 200))
     if rate_limit > 0:
         rl_key = f"{RATE_LIMIT_PREFIX}{slug}"
         current = await r.eval(_RL_LUA, 1, rl_key)
