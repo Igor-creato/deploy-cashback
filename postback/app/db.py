@@ -210,61 +210,73 @@ def save_raw_webhook(
     payload_json: str, network_slug: str, *, _max_retries: int = 3
 ) -> int | None:
     """
-    Insert into cashback_webhooks with deduplication.
-    payload_hash is computed by a BEFORE INSERT trigger (SHA2 of payload).
-    UNIQUE KEY on payload_hash handles deduplication via INSERT IGNORE.
+    Atomic upsert into cashback_webhooks с race-free retry-семантикой (F-S1-001).
 
-    If a duplicate exists with a failed processing_status (user_mismatch,
-    click_not_found, error), delete the old record and re-insert so the
-    webhook can be reprocessed. Successfully processed webhooks (ok, NULL)
-    are still deduplicated.
+    `payload_hash` — generated column `SHA2(JSON_NORMALIZE(payload), 256)` с
+    UNIQUE KEY `uk_payload_hash` — отлавливает дедуп на уровне БД.
 
-    Returns row id or None if duplicate (already processed successfully).
-    Retries on deadlock (MySQL error 1213).
+    Семантика:
+      - Новая payload → INSERT, return new id (rowcount=1).
+      - Существующая строка с retryable status (user_mismatch / click_not_found
+        / error) → atomic UPDATE: status=NULL + refresh received_at + replace
+        payload, return id (rowcount=2).
+      - Существующая строка с status='ok' или NULL (in-flight) → no-op,
+        return None (rowcount=0).
+
+    Все три ветки в одной SQL (`INSERT ... ON DUPLICATE KEY UPDATE`) —
+    устраняет TOCTOU между SELECT, DELETE и INSERT IGNORE предыдущей реализации.
+
+    `LAST_INSERT_ID(id)` трюк гарантирует корректный `cur.lastrowid` и для
+    INSERT, и для UPDATE-пути.
+
+    Retries on deadlock (MySQL 1213).
     """
     prefix = _prefix()
     table = f"{prefix}cashback_webhooks"
-    payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+    # Список retryable-статусов для условного reset в UPDATE-части.
+    # Кавычки обрамляют каждое значение для SQL-литерала.
+    retryable_in = ", ".join(f"'{s}'" for s in _RETRYABLE_STATUSES)
 
     for attempt in range(1, _max_retries + 1):
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    # Check if a failed duplicate exists that should be retried
+                    # F-S1-001: atomic upsert. UNIQUE KEY на payload_hash
+                    # автоматически активирует ON DUPLICATE KEY UPDATE при дубликате.
+                    # IF на processing_status пускает reset только для retryable;
+                    # row со status='ok' или NULL (in-flight) остаётся неизменной
+                    # → rowcount=0 → caller получает None и пропускает.
                     cur.execute(
-                        f"SELECT `id`, `processing_status` FROM `{table}` "
-                        f"WHERE `payload_hash` = %s LIMIT 1",
-                        (payload_hash,),
-                    )
-                    existing = cur.fetchone()
-
-                    if existing is not None:
-                        status = existing.get("processing_status")
-                        if status in _RETRYABLE_STATUSES:
-                            # Delete failed record to allow reprocessing
-                            cur.execute(
-                                f"DELETE FROM `{table}` WHERE `id` = %s",
-                                (existing["id"],),
-                            )
-                            conn.commit()
-                            logger.info(
-                                "Deleted failed webhook id=%s (status=%s) for reprocessing",
-                                existing["id"], status,
-                            )
-                        else:
-                            # Already processed successfully — true duplicate
-                            return None
-
-                    cur.execute(
-                        f"INSERT IGNORE INTO `{table}` "
+                        f"INSERT INTO `{table}` "
                         f"(`payload`, `network_slug`, `received_at`) "
-                        f"VALUES (%s, %s, UTC_TIMESTAMP())",
+                        f"VALUES (%s, %s, UTC_TIMESTAMP()) "
+                        f"ON DUPLICATE KEY UPDATE "
+                        f"  `id` = LAST_INSERT_ID(`id`), "
+                        f"  `received_at` = IF(`processing_status` IN ({retryable_in}), "
+                        f"                     UTC_TIMESTAMP(), `received_at`), "
+                        f"  `payload` = IF(`processing_status` IN ({retryable_in}), "
+                        f"                 VALUES(`payload`), `payload`), "
+                        f"  `processing_status` = IF(`processing_status` IN ({retryable_in}), "
+                        f"                            NULL, `processing_status`)",
                         (payload_json, network_slug),
                     )
+                    rowcount = cur.rowcount
+                    webhook_id = cur.lastrowid
                     conn.commit()
-                    if cur.rowcount == 0:
-                        return None  # race condition: another worker inserted first
-                    return cur.lastrowid
+
+                    # MySQL semantics для INSERT ... ON DUPLICATE KEY UPDATE:
+                    #   1 = INSERT (новая строка)
+                    #   2 = UPDATE с реальным изменением (re-armed retry)
+                    #   0 = UPDATE no-op (status='ok' или NULL → IF не дал изменить)
+                    if rowcount == 1:
+                        return webhook_id
+                    if rowcount == 2:
+                        logger.info(
+                            "Re-armed webhook id=%s (was retryable status) for reprocessing",
+                            webhook_id,
+                        )
+                        return webhook_id
+                    return None  # already processed (ok) or in-flight (NULL)
         except pymysql.err.OperationalError as e:
             if e.args[0] == 1213 and attempt < _max_retries:
                 logger.warning("Deadlock on save_raw_webhook, retry %d/%d", attempt, _max_retries)
