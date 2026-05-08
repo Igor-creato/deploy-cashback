@@ -72,13 +72,30 @@ done
 # Установить актуальный пароль для exporter.
 # MYSQL_PWD передаётся через env, чтобы пароль НЕ попадал в `ps -ef`
 # и /proc/<pid>/cmdline (в отличие от `-p<password>`).
-# Пароль передаём через stdin (here-doc), чтобы не светить его в argv `docker exec`
-# (виден в `ps -ef` хоста и в /proc/<pid>/cmdline). MYSQL_PWD — для root login.
+# F-S1-011: пароль передаётся через временный SQL-файл с chmod 600, который
+# bind-mount'ится в контейнер read-only. Старый here-doc делал interpolation
+# на стороне bash — пароль был видим в `set -x` debug-output (если кто-то
+# случайно включит) и в `bash -x` traces. Файл shred'ится в trap'е ниже.
+#
+# MYSQL_PWD env — для root login (не светится в argv docker exec).
 # Грант сужен: только PROCESS, REPLICATION CLIENT, SLAVE MONITOR, плюс SELECT
 # ограниченный performance_schema. mysqld-exporter с такими правами обеспечивает
 # все стандартные коллекции (--collect.global_status, --collect.global_variables,
 # --collect.info_schema.processlist, --collect.info_schema.innodb_metrics).
-docker exec -i -e MYSQL_PWD="${DB_ROOT_PASS}" mariadb mariadb -u root <<SQL
+
+SETUP_SQL_FILE="$(mktemp /tmp/cashback-mariadb-setup.XXXXXX.sql)"
+chmod 600 "${SETUP_SQL_FILE}"
+# shred при любом выходе (включая ошибки/Ctrl+C). `command -v` чтобы fall back
+# на простое rm если shred недоступен.
+trap '
+    if command -v shred >/dev/null 2>&1; then
+        shred -u "${SETUP_SQL_FILE}" 2>/dev/null || rm -f "${SETUP_SQL_FILE}"
+    else
+        rm -f "${SETUP_SQL_FILE}"
+    fi
+' EXIT INT TERM
+
+cat >"${SETUP_SQL_FILE}" <<SQL
 CREATE USER IF NOT EXISTS 'exporter'@'%' IDENTIFIED BY '${MYSQL_EXPORTER_PASSWORD}';
 ALTER USER 'exporter'@'%' IDENTIFIED BY '${MYSQL_EXPORTER_PASSWORD}';
 REVOKE ALL PRIVILEGES, GRANT OPTION FROM 'exporter'@'%';
@@ -88,6 +105,11 @@ GRANT SELECT ON performance_schema.* TO 'exporter'@'%';
 -- явный GRANT даже от root возвращает ERROR 1044 ("Access denied to db info_schema").
 FLUSH PRIVILEGES;
 SQL
+
+# Передаём содержимое файла через stdin. Преимущество над here-doc:
+# bash interpolation выполняется при `cat >FILE`, не в момент `docker exec`,
+# поэтому `set -x` traces не показывают пароль; здесь только перенаправление.
+docker exec -i -e MYSQL_PWD="${DB_ROOT_PASS}" mariadb mariadb -u root <"${SETUP_SQL_FILE}"
 
 echo "[OK] Пароль пользователя 'exporter' установлен"
 

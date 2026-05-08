@@ -199,6 +199,11 @@ services:
         define('WP_MEMORY_LIMIT', '256M');
         define('WP_MAX_MEMORY_LIMIT', '512M');
         define('FORCE_SSL_ADMIN', true);
+        // F-S1-013: hard-pin WP_HOME/WP_SITEURL — защита от open-redirect и
+        // password-reset email под чужой Host. Без них WP читает options
+        // из БД, и их можно подменить через SQL-инъекцию или admin-action.
+        define('WP_HOME', 'https://${DOMAIN}');
+        define('WP_SITEURL', 'https://${DOMAIN}');
         if (isset($$_SERVER['HTTP_X_FORWARDED_PROTO']) && strpos($$_SERVER['HTTP_X_FORWARDED_PROTO'], 'https') !== false) {
           $$_SERVER['HTTPS'] = 'on';
         }

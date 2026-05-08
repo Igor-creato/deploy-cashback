@@ -39,11 +39,14 @@ entryPoints:
         idleTimeout: 120s
     forwardedHeaders:
       insecure: false
+      # F-S1-012: trustedIPs сужены до фактически используемых диапазонов.
+      # Docker по умолчанию использует 172.16-31.x.x (default bridge + custom
+      # bridges); 10.0.0.0/8 и 192.168.0.0/16 не задействуются. Если кто-то
+      # поднимет VPN/wireguard-туннель в эти диапазоны, он мог бы spoof'ить
+      # X-Forwarded-For и обходить per-IP rate-limit / real-IP detection.
       trustedIPs:
         - '127.0.0.1/32'
-        - '10.0.0.0/8'
         - '172.16.0.0/12'
-        - '192.168.0.0/16'
   ping:
     address: ':8082'
 
