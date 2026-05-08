@@ -225,6 +225,11 @@ services:
       SMTP_PASSWORD_FILE: /run/secrets/smtp_password
       SMTP_SECURE: ${SMTP_SECURE:-tls}
       SMTP_FROM: ${SMTP_FROM}
+      # cash-back fastcgi_cache purger: WP-контейнер удаляет файлы кэша при
+      # изменении товаров. Cache key/levels должны совпадать с nginx default.conf.
+      CASHBACK_NGINX_CACHE_PATH: /var/cache/nginx/fastcgi
+      CASHBACK_NGINX_CACHE_KEY_FORMAT: '$$scheme$$request_method$$host$$request_uri'
+      CASHBACK_NGINX_CACHE_LEVELS: '1:2'
     secrets:
       - db_password
       - smtp_password
@@ -232,6 +237,7 @@ services:
       - ./volumes/wordpress:/var/www/html
       - ./volumes/php-config/wordpress.ini:/usr/local/etc/php/conf.d/wordpress.ini:ro
       - ./volumes/php-config/www.conf:/usr/local/etc/php-fpm.d/zz-www.conf:ro
+      - nginx_cache:/var/cache/nginx
     healthcheck:
       test: ['CMD-SHELL', 'php-fpm-healthcheck || kill -0 1']
       interval: 30s
@@ -343,6 +349,9 @@ services:
     restart: always
     mem_limit: 256m
     mem_reservation: 64m
+    # UID/GID 33:33 = www-data в WP-контейнере. Унификация нужна, чтобы WP мог
+    # удалять файлы из nginx_cache (fastcgi_cache_purge от cash-back плагина).
+    user: "33:33"
     networks:
       - internal
     depends_on:
@@ -619,7 +628,8 @@ volumes:
     driver_opts:
       type: tmpfs
       device: tmpfs
-      o: size=512m,uid=101,gid=101
+      # uid/gid=33 = www-data; см. user: "33:33" у nginx и mount у wordpress.
+      o: size=512m,uid=33,gid=33,mode=0755
   traefik_logs:
     driver: local
   redis_data:
