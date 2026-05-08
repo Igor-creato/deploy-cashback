@@ -521,7 +521,8 @@ async def network_save(slug: str, request: Request, whk_session: str | None = Co
     sig_header = (form.get("sig_header") or existing_sig.get("header", "X-Signature")).strip()
 
     # Whitelist допустимых значений — защита от инъекции через форму.
-    if sig_algo not in ("hmac-sha256", "hmac-sha1", "hmac-md5"):
+    # F-S1-008: HMAC-MD5 удалён (deprecated, collision attacks).
+    if sig_algo not in ("hmac-sha256", "hmac-sha1"):
         sig_algo = "hmac-sha256"
     if sig_format not in ("hex", "base64", "sha256-prefix-hex"):
         sig_format = "hex"

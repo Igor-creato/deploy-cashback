@@ -129,7 +129,7 @@ DEFAULT_STATUS_MAP: dict[str, str] = {
 # Включается per-network через админку для сетей вроде Stripe,
 # GitHub, Salesforce, Tinkoff Acquiring и т.п., где есть HMAC.
 #
-# algorithm: hmac-sha256 | hmac-sha1 | hmac-md5
+# algorithm: hmac-sha256 (default, preferred) | hmac-sha1 (legacy CPA only)
 # header:    имя HTTP-заголовка с подписью (X-Signature, Sign,
 #            X-Hub-Signature-256, X-Webhook-Signature, ...)
 # format:    hex                — голый hex-digest "a3f2..."

@@ -135,6 +135,9 @@ tar czf "${BACKUP_DIR}/configs.tar.gz" \
   volumes/nginx/ \
   volumes/php-config/ \
   volumes/mariadb/conf.d/ 2>/dev/null
+# F-S1-010: configs.tar.gz содержит .env с DB-паролем; BACKUP_DIR mode 750
+# делает архив group-readable. Жёстко 600 — read-only для owner.
+chmod 600 "${BACKUP_DIR}/configs.tar.gz"
 echo "[OK] $(date): Конфигурации заархивированы"
 
 # ── Ротация старых бэкапов ──

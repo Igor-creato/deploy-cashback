@@ -91,10 +91,12 @@ def _is_safe_slug(s: str) -> bool:
     return bool(s and _SLUG_RE.match(s))
 
 
+# F-S1-008: HMAC-MD5 удалён из whitelist — collision attacks возможны на устаревшем
+# алгоритме. SHA1 оставлен на случай легаси CPA-сети, требующей именно его, но
+# default и preferred — sha256.
 _HMAC_DIGEST_MODS = {
     "hmac-sha256": hashlib.sha256,
     "hmac-sha1": hashlib.sha1,
-    "hmac-md5": hashlib.md5,
 }
 
 
