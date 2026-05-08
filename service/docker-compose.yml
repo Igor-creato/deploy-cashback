@@ -432,11 +432,22 @@ services:
         condition: service_healthy
     environment:
       - DOCKER_API_VERSION=1.44
-    privileged: true
+    # F-S1-003: unprivileged. `privileged: true` снимало все capability-ограничения
+    # → host-RCE при CVE в cAdvisor. Минимально необходимый набор: SYS_PTRACE для
+    # process introspection, /dev/kmsg для kernel events. containerd.sock mount
+    # удалён — `--docker_only=true` использует только docker.sock.
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_PTRACE
+      - DAC_READ_SEARCH
+    security_opt:
+      - no-new-privileges:true
+    devices:
+      - /dev/kmsg
     volumes:
       - /:/rootfs:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /run/containerd/containerd.sock:/run/containerd/containerd.sock:ro
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
       - /dev/disk/:/dev/disk:ro
