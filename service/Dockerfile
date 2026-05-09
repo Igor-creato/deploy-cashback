@@ -51,10 +51,24 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/* /tmp/pear
 
 # ── WP-CLI (для host-cron и администрирования) ──
-RUN curl -fsSL -o /usr/local/bin/wp \
-      https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
- && chmod +x /usr/local/bin/wp \
- && /usr/local/bin/wp --info --allow-root >/dev/null
+# Доставляем с GitHub Raw, при недоступности (DNS-сбой, 5xx, rate limit)
+# делаем 3 повторных попытки с paused, затем фоллбэк на S3-mirror проекта
+# wp-cli. Это additive: при штатном GitHub поведение прежнее, fallback
+# только спасает голую сборку на сервере без зеркала docker hub.
+RUN set -eux; \
+    ok=0; \
+    for i in 1 2 3; do \
+      curl -fsSL --retry 3 --retry-delay 2 -o /usr/local/bin/wp \
+        https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
+        && ok=1 && break; \
+      sleep 5; \
+    done; \
+    if [ "$ok" -ne 1 ]; then \
+      curl -fsSL --retry 3 --retry-delay 2 -o /usr/local/bin/wp \
+        https://wp-cli-builds.s3.amazonaws.com/wp-cli-latest-phar; \
+    fi; \
+    chmod +x /usr/local/bin/wp; \
+    /usr/local/bin/wp --info --allow-root >/dev/null
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint-msmtp.sh"]
 CMD ["php-fpm"]
