@@ -7,6 +7,7 @@
 service/.env
 service/.env.local
 service/secrets/
+service/volumes/nginx/default.conf
 postback/.env
 postback/.env.local
 

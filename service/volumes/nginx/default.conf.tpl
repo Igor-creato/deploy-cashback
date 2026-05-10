@@ -16,12 +16,14 @@ server {
 
 server {
     listen 80;
-    # Основной домен + healthcheck-имена. server_name regex принимает:
-    #   - `.autmatization-bot.ru` (wildcard для текущего и будущих поддоменов)
-    #   - `localhost` (docker compose internal)
-    #   - `127.0.0.1` (Dockerfile HEALTHCHECK использует именно IP, не name)
-    #   - `nginx` (container_name, modsecurity → nginx upstream)
-    server_name .autmatization-bot.ru localhost 127.0.0.1 nginx;
+    # server_name подставляется install.sh из service/.env (NGINX_SERVER_NAMES).
+    # Формат: "<DOMAIN> localhost 127.0.0.1 nginx" (дефолт), или
+    # ".example.com localhost 127.0.0.1 nginx" для multi-subdomain wildcard.
+    # Healthcheck-имена обязательны:
+    #   - `localhost` — docker compose internal
+    #   - `127.0.0.1` — Dockerfile HEALTHCHECK использует именно IP, не name
+    #   - `nginx` — container_name, modsecurity → nginx upstream
+    server_name ${NGINX_SERVER_NAMES};
 
     root /var/www/html;
     index index.php index.html;

@@ -67,6 +67,12 @@ if [[ -z "$ACME_EMAIL" ]]; then
   exit 1
 fi
 
+# nginx server_name: install-time only, рендерится в default.conf через envsubst.
+# Дефолт — точное совпадение с DOMAIN. Для multi-subdomain wildcard
+# (".example.com localhost 127.0.0.1 nginx") задать env-переменной до запуска:
+#   NGINX_SERVER_NAMES=".example.com localhost 127.0.0.1 nginx" sudo bash install.sh
+NGINX_SERVER_NAMES="${NGINX_SERVER_NAMES:-${DOMAIN} localhost 127.0.0.1 nginx}"
+
 # ─── SMTP настройки ─────────────────────────────────────
 echo ""
 info "Настройка отправки email (SMTP)"
@@ -204,6 +210,10 @@ SMTP_FROM=${SMTP_FROM}
 # Email для алертов Grafana
 ALERT_EMAIL=${ALERT_EMAIL}
 
+# nginx server_name (install-time only, не читается docker compose).
+# Используется install.sh'ом для envsubst-рендера default.conf.tpl → default.conf.
+NGINX_SERVER_NAMES=${NGINX_SERVER_NAMES}
+
 # mysqld-exporter пароль больше НЕ хранится в .env — он лежит в
 # secrets/mysql_exporter.cnf (Docker secret) и оттуда читается как самим
 # exporter'ом (--config.my-cnf), так и setup-mariadb-users.sh при ротации.
@@ -288,6 +298,20 @@ if [[ -f "$CP_TPL" ]]; then
   ALERT_EMAIL="$ALERT_EMAIL" envsubst '${ALERT_EMAIL}' < "$CP_TPL" > "$CP_OUT"
   chmod 644 "$CP_OUT"
   log "contact-points.yml сгенерирован (ALERT_EMAIL=${ALERT_EMAIL})"
+fi
+
+# ─── Рендеринг nginx default.conf ────────────────────────
+# server_name домена не должен быть hardcoded в default.conf (audit 2026-05-10).
+# default_server блок (return 444 на чужой Host:) остаётся без изменений —
+# это defense-in-depth, не зависит от домена.
+NGINX_TPL="$INSTALL_DIR/volumes/nginx/default.conf.tpl"
+NGINX_OUT="$INSTALL_DIR/volumes/nginx/default.conf"
+if [[ -f "$NGINX_TPL" ]]; then
+  NGINX_SERVER_NAMES="$NGINX_SERVER_NAMES" envsubst '${NGINX_SERVER_NAMES}' < "$NGINX_TPL" > "$NGINX_OUT"
+  chmod 644 "$NGINX_OUT"
+  log "default.conf сгенерирован (server_name: ${NGINX_SERVER_NAMES})"
+else
+  warn "default.conf.tpl не найден — пропуск рендера nginx-конфига"
 fi
 
 # ─── Создание Docker-сетей ────────────────────────────────
