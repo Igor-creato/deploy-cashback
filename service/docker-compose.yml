@@ -156,7 +156,7 @@ services:
       --auto-aof-rewrite-percentage 100
       --auto-aof-rewrite-min-size 64mb
       --tcp-keepalive 60
-      --timeout 300
+      --timeout 0
       --hz 10
       --lfu-log-factor 10
       --activedefrag yes
@@ -210,8 +210,8 @@ services:
         define('WP_REDIS_HOST', 'redis');
         define('WP_REDIS_PORT', 6379);
         define('WP_REDIS_DATABASE', 0);
-        define('WP_REDIS_TIMEOUT', 1);
-        define('WP_REDIS_READ_TIMEOUT', 1);
+        define('WP_REDIS_TIMEOUT', 2);
+        define('WP_REDIS_READ_TIMEOUT', 2);
         define('DISALLOW_FILE_EDIT', true);
         define('WP_AUTO_UPDATE_CORE', 'minor');
         define('WP_POST_REVISIONS', 5);
@@ -220,6 +220,13 @@ services:
         define('DISABLE_WP_CRON', true);
         define('CONCATENATE_SCRIPTS', false);
         define('WP_CACHE', true);
+        // Loco Translate инстанцирует WP_Filesystem_Direct напрямую, минуя
+        // WP_Filesystem(), и обращается к FS_CHMOD_FILE до того, как
+        // wp-admin/includes/file.php успевает её определить → фатал в chmod().
+        // Доопределяем константы FS до загрузки wp-settings.php.
+        define('FS_METHOD', 'direct');
+        define('FS_CHMOD_DIR', 0755);
+        define('FS_CHMOD_FILE', 0644);
         if (getenv('WP_DEBUG_ENABLE') === '1') {
           @ini_set('error_log', '/var/www/html/wp-content/debug.log');
           @ini_set('log_errors', '1');
