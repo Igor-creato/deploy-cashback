@@ -147,4 +147,3 @@ info "═══ установка webhook-receiver: ${WEBHOOK_DIR} ═══"
 
 echo
 log "оба стека установлены и запущены"
-info "следующий шаг (опционально): sudo bash ${STACK_DIR}/scripts/setup-cron.sh"
