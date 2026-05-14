@@ -224,9 +224,15 @@ services:
         // WP_Filesystem(), и обращается к FS_CHMOD_FILE до того, как
         // wp-admin/includes/file.php успевает её определить → фатал в chmod().
         // Доопределяем константы FS до загрузки wp-settings.php.
-        define('FS_METHOD', 'direct');
-        define('FS_CHMOD_DIR', 0755);
-        define('FS_CHMOD_FILE', 0644);
+        if (!defined('FS_METHOD')) {
+          define('FS_METHOD', 'direct');
+        }
+        if (!defined('FS_CHMOD_DIR')) {
+          define('FS_CHMOD_DIR', 0755);
+        }
+        if (!defined('FS_CHMOD_FILE')) {
+          define('FS_CHMOD_FILE', 0644);
+        }
         if (getenv('WP_DEBUG_ENABLE') === '1') {
           @ini_set('error_log', '/var/www/html/wp-content/debug.log');
           @ini_set('log_errors', '1');
