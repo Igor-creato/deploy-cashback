@@ -200,14 +200,59 @@ def _get_allowed_statuses() -> set[str]:
 
 # ============================================================
 # cashback_webhooks — raw payload storage
-# Columns: id, payload, payload_hash, network_slug, received_at
+# Columns: id, payload, payload_hash, network_slug, received_at,
+#          processing_status, event_type (плагин v14+ — partner_status routing)
 # ============================================================
 
 _RETRYABLE_STATUSES = ("user_mismatch", "click_not_found", "error")
 
+# TTL-кэш для defensive column-presence check (плагин v14 добавляет колонку
+# `event_type` на activate(); receiver может стартовать раньше — нужен fallback).
+_event_type_column_cache: tuple[float, bool] = (0.0, False)
+_EVENT_TYPE_CACHE_TTL = 300  # 5 минут
+
+
+def _has_event_type_column() -> bool:
+    """Проверить наличие колонки `event_type` в cashback_webhooks (cached 5 мин).
+
+    Возвращает False — если колонки нет (плагин ещё не выкатил миграцию v14)
+    или если запрос сорвался (graceful degradation).
+    """
+    global _event_type_column_cache
+    now = time.time()
+    cached_at, cached_value = _event_type_column_cache
+    if now - cached_at < _EVENT_TYPE_CACHE_TTL and cached_at > 0:
+        return cached_value
+
+    prefix = _prefix()
+    db_cfg = get_db_config()
+    database = db_cfg.get("database", "")
+    table = f"{prefix}cashback_webhooks"
+    has_column = False
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS "
+                    "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s "
+                    "AND COLUMN_NAME = 'event_type' LIMIT 1",
+                    (database, table),
+                )
+                has_column = cur.fetchone() is not None
+    except Exception:
+        logger.warning("Failed to introspect cashback_webhooks.event_type column")
+        has_column = False
+
+    _event_type_column_cache = (now, has_column)
+    return has_column
+
 
 def save_raw_webhook(
-    payload_json: str, network_slug: str, *, _max_retries: int = 3
+    payload_json: str,
+    network_slug: str,
+    *,
+    event_type: str = "transaction",
+    _max_retries: int = 3,
 ) -> int | None:
     """
     Atomic upsert into cashback_webhooks с race-free retry-семантикой (F-S1-001).
@@ -223,6 +268,13 @@ def save_raw_webhook(
       - Существующая строка с status='ok' или NULL (in-flight) → no-op,
         return None (rowcount=0).
 
+    `event_type` (default 'transaction'): тип события. 'partner_status' —
+    Advcake-постбэк об изменении статуса оффера партнёрской программы
+    (плагин-side handler `Cashback_Advcake_Partner_Status_Sync` обрабатывает).
+    Если колонка `event_type` ещё не создана плагин-миграцией v14 — fallback
+    к INSERT без неё, плюс WARN-лог при event_type != 'transaction'
+    (потеря маршрутизации — плагин не подберёт row).
+
     Все три ветки в одной SQL (`INSERT ... ON DUPLICATE KEY UPDATE`) —
     устраняет TOCTOU между SELECT, DELETE и INSERT IGNORE предыдущей реализации.
 
@@ -233,41 +285,55 @@ def save_raw_webhook(
     """
     prefix = _prefix()
     table = f"{prefix}cashback_webhooks"
-    # Список retryable-статусов для условного reset в UPDATE-части.
-    # Кавычки обрамляют каждое значение для SQL-литерала.
     retryable_in = ", ".join(f"'{s}'" for s in _RETRYABLE_STATUSES)
+
+    has_event_type = _has_event_type_column()
+    if event_type != "transaction" and not has_event_type:
+        logger.warning(
+            "save_raw_webhook called with event_type=%r but column missing "
+            "(plugin v14 migration not yet applied); plugin-side routing "
+            "will not pick up this row",
+            event_type,
+        )
 
     for attempt in range(1, _max_retries + 1):
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    # F-S1-001: atomic upsert. UNIQUE KEY на payload_hash
-                    # автоматически активирует ON DUPLICATE KEY UPDATE при дубликате.
-                    # IF на processing_status пускает reset только для retryable;
-                    # row со status='ok' или NULL (in-flight) остаётся неизменной
-                    # → rowcount=0 → caller получает None и пропускает.
-                    cur.execute(
-                        f"INSERT INTO `{table}` "
-                        f"(`payload`, `network_slug`, `received_at`) "
-                        f"VALUES (%s, %s, UTC_TIMESTAMP()) "
-                        f"ON DUPLICATE KEY UPDATE "
-                        f"  `id` = LAST_INSERT_ID(`id`), "
-                        f"  `received_at` = IF(`processing_status` IN ({retryable_in}), "
-                        f"                     UTC_TIMESTAMP(), `received_at`), "
-                        f"  `payload` = IF(`processing_status` IN ({retryable_in}), "
-                        f"                 VALUES(`payload`), `payload`), "
-                        f"  `processing_status` = IF(`processing_status` IN ({retryable_in}), "
-                        f"                            NULL, `processing_status`)",
-                        (payload_json, network_slug),
-                    )
+                    if has_event_type:
+                        cur.execute(
+                            f"INSERT INTO `{table}` "
+                            f"(`payload`, `network_slug`, `received_at`, `event_type`) "
+                            f"VALUES (%s, %s, UTC_TIMESTAMP(), %s) "
+                            f"ON DUPLICATE KEY UPDATE "
+                            f"  `id` = LAST_INSERT_ID(`id`), "
+                            f"  `received_at` = IF(`processing_status` IN ({retryable_in}), "
+                            f"                     UTC_TIMESTAMP(), `received_at`), "
+                            f"  `payload` = IF(`processing_status` IN ({retryable_in}), "
+                            f"                 VALUES(`payload`), `payload`), "
+                            f"  `processing_status` = IF(`processing_status` IN ({retryable_in}), "
+                            f"                            NULL, `processing_status`)",
+                            (payload_json, network_slug, event_type),
+                        )
+                    else:
+                        cur.execute(
+                            f"INSERT INTO `{table}` "
+                            f"(`payload`, `network_slug`, `received_at`) "
+                            f"VALUES (%s, %s, UTC_TIMESTAMP()) "
+                            f"ON DUPLICATE KEY UPDATE "
+                            f"  `id` = LAST_INSERT_ID(`id`), "
+                            f"  `received_at` = IF(`processing_status` IN ({retryable_in}), "
+                            f"                     UTC_TIMESTAMP(), `received_at`), "
+                            f"  `payload` = IF(`processing_status` IN ({retryable_in}), "
+                            f"                 VALUES(`payload`), `payload`), "
+                            f"  `processing_status` = IF(`processing_status` IN ({retryable_in}), "
+                            f"                            NULL, `processing_status`)",
+                            (payload_json, network_slug),
+                        )
                     rowcount = cur.rowcount
                     webhook_id = cur.lastrowid
                     conn.commit()
 
-                    # MySQL semantics для INSERT ... ON DUPLICATE KEY UPDATE:
-                    #   1 = INSERT (новая строка)
-                    #   2 = UPDATE с реальным изменением (re-armed retry)
-                    #   0 = UPDATE no-op (status='ok' или NULL → IF не дал изменить)
                     if rowcount == 1:
                         return webhook_id
                     if rowcount == 2:

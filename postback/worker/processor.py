@@ -227,6 +227,28 @@ def process_message(raw_message: str) -> None:
         logger.warning("Unknown network slug in queue: %s", slug)
         return
 
+    # ─── event_type routing (Advcake partner-status и пр. non-transaction постбэки) ───
+    # Postback с `event_type=partner_status` приходит, например, от Advcake
+    # при изменении статуса оффера партнёрской программы. У него нет click_id /
+    # uniq_id / sum_order — обычная transaction-pipeline на нём фейлится.
+    # Сохраняем raw payload с event_type='partner_status' и processing_status=NULL,
+    # дальше плагин-side обработчик (Cashback_Advcake_Partner_Status_Sync) подберёт
+    # row и применит изменение в WC (post_status publish ↔ draft).
+    raw_event_type = str(params.get("event_type", "") or "").strip().lower()
+    if raw_event_type == "partner_status":
+        payload_json = json.dumps(params, ensure_ascii=False, default=str)
+        webhook_id = save_raw_webhook(payload_json, slug, event_type="partner_status")
+        if webhook_id is None:
+            logger.info("Duplicate partner_status webhook for %s, skipping", slug)
+        else:
+            logger.info(
+                "Stored partner_status webhook id=%s slug=%s — awaiting plugin-side processing",
+                webhook_id, slug,
+            )
+            PROCESSED_TOTAL.labels(result="partner_status_queued").inc()
+            LAST_PROCESSED.set(time.time())
+        return
+
     mapping = network.get("mapping", {})
     status_mapping = network.get("status_mapping")
 
