@@ -90,11 +90,24 @@ SMTP_FROM="${SMTP_FROM:-$SMTP_USER}"
 read -rp "$(echo -e "${CYAN}Email для получения алертов Grafana (можно через запятую) [${SMTP_USER}]: ${NC}")" ALERT_EMAIL
 ALERT_EMAIL="${ALERT_EMAIL:-$SMTP_USER}"
 
+# ─── MariaDB host port ───────────────────────────────────
+# Порт на хосте (127.0.0.1), который пробрасывается на 3306 в контейнере.
+# Меняй, если на сервере уже занят 33306 (например, другая инсталляция).
+echo ""
+info "Порт MariaDB на хосте (bind на 127.0.0.1, контейнерный порт всегда 3306)"
+read -rp "$(echo -e "${CYAN}MariaDB host port [33306]: ${NC}")" MARIADB_HOST_PORT
+MARIADB_HOST_PORT="${MARIADB_HOST_PORT:-33306}"
+if ! [[ "$MARIADB_HOST_PORT" =~ ^[0-9]+$ ]] || (( MARIADB_HOST_PORT < 1 || MARIADB_HOST_PORT > 65535 )); then
+  err "MariaDB host port должен быть числом 1-65535 (получено: ${MARIADB_HOST_PORT})"
+  exit 1
+fi
+
 echo ""
 info "Домен:  $DOMAIN"
 info "Email:  $ACME_EMAIL"
 info "SMTP:   $SMTP_HOST:$SMTP_PORT ($SMTP_SECURE)"
 info "Алерты: $ALERT_EMAIL"
+info "MariaDB host port: 127.0.0.1:${MARIADB_HOST_PORT}"
 echo ""
 read -rp "$(echo -e "${YELLOW}Продолжить? (y/n): ${NC}")" CONFIRM
 if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
@@ -197,6 +210,9 @@ ACME_EMAIL=${ACME_EMAIL}
 # MariaDB
 MYSQL_DATABASE=${MYSQL_DATABASE}
 MYSQL_USER=${MYSQL_USER}
+# Порт MariaDB на хосте (контейнерный порт всегда 3306).
+# Меняется через install.sh; docker-compose.yml читает как \${MARIADB_HOST_PORT:-33306}.
+MARIADB_HOST_PORT=${MARIADB_HOST_PORT}
 # MYSQL_ROOT_PASSWORD и MYSQL_PASSWORD хранятся в secrets/, не в .env,
 # чтобы не светиться через `docker inspect` mariadb-контейнера.
 

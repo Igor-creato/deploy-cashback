@@ -110,7 +110,7 @@ services:
       - internal
       - db-shared
     ports:
-      - '127.0.0.1:33306:3306'
+      - '127.0.0.1:${MARIADB_HOST_PORT:-33306}:3306'
     environment:
       TZ: UTC
       MARIADB_AUTO_UPGRADE: '1'
