@@ -36,6 +36,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # адреса получают вес 100 и идут первыми.
 RUN printf 'precedence ::ffff:0:0/96 100\n' >> /etc/gai.conf
 
+# ── PHP-FPM: убрать дублирующий дефолтный pool базового образа ──
+# Инцидент 2026-05-16 (прод savelloclub.ru): базовый www.conf образа
+# (полный [www], listen=9000) сосуществовал с нашим zz-www.conf
+# (volumes/php-config/www.conf, listen=0.0.0.0:9000). При старте
+# контейнера фрагменты [www] сливались в один рабочий пул, но
+# `docker kill -s USR2 wordpress` (graceful reload из deploy.yml плагина)
+# этот многофайловый layout не переживал: воркеры не биндились → выходили
+# code 0 за ~8мс → master бесконечно их респаунил (~120/сек), флуд лога.
+# Оставляем официальные docker.conf / zz-docker.conf (только [global] +
+# минимальные [www]-фрагменты, задуманы для слияния). Полный пул теперь
+# определяется ТОЛЬКО zz-www.conf → USR2-reload снова безопасен.
+RUN rm -f /usr/local/etc/php-fpm.d/www.conf \
+          /usr/local/etc/php-fpm.d/www.conf.default
+
 # ── PhpRedis (нативный клиент Redis) ──
 # Без него Redis Object Cache откатывается на Predis (PHP-эмуляция протокола),
 # что даёт ×5–×10 латентность на каждое обращение к Redis. На WooCommerce
