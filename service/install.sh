@@ -293,55 +293,25 @@ touch "$INSTALL_DIR/volumes/traefik/acme.json"
 chmod 600 "$INSTALL_DIR/volumes/traefik/acme.json"
 log "acme.json создан (chmod 600)"
 
-# ─── traefik.yml рендерится из .tpl ниже (вместе с nginx/grafana) ───
-# Раньше здесь был `sed -i __ACME_EMAIL__` ПО tracked traefik.yml —
-# из-за этого рабочее дерево на сервере вечно было «грязным» (M).
-# Теперь .tpl + envsubst, как у nginx/grafana; generated traefik.yml
-# в .gitignore. Рендер — после блока установки envsubst (ниже).
-
-# ─── Рендеринг шаблонов Grafana provisioning ─────────────
-# Grafana 12.4 не разворачивает env-vars в contactPoints[].settings.addresses,
-# поэтому contact-points.yml генерится из шаблона .tpl через envsubst.
+# ─── Рендеринг конфигов из .tpl (единый источник — render-configs.sh) ──
+# Раньше install.sh инлайнил три envsubst-блока (traefik/nginx/grafana),
+# а traefik вообще делал `sed -i` ПО tracked-файлу → рабочее дерево на
+# сервере вечно «грязное» (M traefik.yml). Теперь единый
+# render-configs.sh читает service/.env и рендерит ВСЕ .tpl —
+# install-рендер и ручной ре-рендер байт-идентичны, без хардкода.
+# Generated-файлы (traefik.yml/default.conf/contact-points.yml) в
+# .gitignore. envsubst нужен скрипту — ставим заранее.
 if ! command -v envsubst &>/dev/null; then
   info "Установка gettext-base (даёт envsubst)..."
   apt-get update -qq && apt-get install -y --no-install-recommends gettext-base >/dev/null
   log "gettext-base установлен"
 fi
 
-CP_TPL="$INSTALL_DIR/volumes/grafana/provisioning/alerting/contact-points.yml.tpl"
-CP_OUT="$INSTALL_DIR/volumes/grafana/provisioning/alerting/contact-points.yml"
-if [[ -f "$CP_TPL" ]]; then
-  ALERT_EMAIL="$ALERT_EMAIL" envsubst '${ALERT_EMAIL}' < "$CP_TPL" > "$CP_OUT"
-  chmod 644 "$CP_OUT"
-  log "contact-points.yml сгенерирован (ALERT_EMAIL=${ALERT_EMAIL})"
-fi
-
-# ─── Рендеринг nginx default.conf ────────────────────────
-# server_name домена не должен быть hardcoded в default.conf (audit 2026-05-10).
-# default_server блок (return 444 на чужой Host:) остаётся без изменений —
-# это defense-in-depth, не зависит от домена.
-NGINX_TPL="$INSTALL_DIR/volumes/nginx/default.conf.tpl"
-NGINX_OUT="$INSTALL_DIR/volumes/nginx/default.conf"
-if [[ -f "$NGINX_TPL" ]]; then
-  NGINX_SERVER_NAMES="$NGINX_SERVER_NAMES" envsubst '${NGINX_SERVER_NAMES}' < "$NGINX_TPL" > "$NGINX_OUT"
-  chmod 644 "$NGINX_OUT"
-  log "default.conf сгенерирован (server_name: ${NGINX_SERVER_NAMES})"
+if [[ -f "$INSTALL_DIR/render-configs.sh" ]]; then
+  bash "$INSTALL_DIR/render-configs.sh"
+  log "Конфиги сгенерированы через render-configs.sh"
 else
-  warn "default.conf.tpl не найден — пропуск рендера nginx-конфига"
-fi
-
-# ─── Рендеринг traefik.yml ───────────────────────────────
-# email Let's Encrypt не hardcode'им в tracked-файл (раньше sed -i по
-# traefik.yml оставлял рабочее дерево грязным на сервере). Тот же .tpl +
-# envsubst паттерн, что у nginx/grafana; generated traefik.yml в .gitignore.
-TRAEFIK_TPL="$INSTALL_DIR/volumes/traefik/traefik.yml.tpl"
-TRAEFIK_OUT="$INSTALL_DIR/volumes/traefik/traefik.yml"
-if [[ -f "$TRAEFIK_TPL" ]]; then
-  ACME_EMAIL="$ACME_EMAIL" envsubst '${ACME_EMAIL}' < "$TRAEFIK_TPL" > "$TRAEFIK_OUT"
-  chmod 644 "$TRAEFIK_OUT"
-  log "traefik.yml сгенерирован (ACME_EMAIL=${ACME_EMAIL})"
-else
-  warn "traefik.yml.tpl не найден — пропуск рендера traefik-конфига"
+  warn "render-configs.sh не найден — traefik/nginx/grafana НЕ отрендерены"
 fi
 
 # ─── Создание Docker-сетей ────────────────────────────────
