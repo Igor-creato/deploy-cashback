@@ -18,13 +18,14 @@ import redis
 from prometheus_client import Gauge, Counter, start_http_server
 
 from app.config import get_network, get_db_config, DEFAULT_STATUS_MAP
+from app.identity import resolve_uniq_id
 from app.db import (
     save_raw_webhook,
     check_user_exists,
     check_click_id_and_get_user,
     update_webhook_processing_status,
     insert_transaction,
-    transaction_exists,
+    transaction_exists_for_action,
     resolve_partner_token,
     enqueue_notification,
 )
@@ -290,17 +291,56 @@ def process_message(raw_message: str) -> None:
     raw_status = mapped.get("order_status", "waiting")
     mapped["order_status"] = resolve_status(raw_status, status_mapping)
 
-    # 4. Set partner_name from network config
-    mapped["partner_name"] = network.get("name", slug)
+    # 4. Canonical partner = lower(slug). Single dedup-key component across
+    #    receiver / cron insert_missing_transaction / admin — kills the
+    #    name-vs-slug-vs-case drift that let dups slip UNIQUE(uniq_id,partner).
+    mapped["partner_name"] = slug.strip().lower()
 
     click_id = mapped.get("click_id", "")
-    uniq_id = str(mapped.get("uniq_id", ""))
 
-    # 4b. If transaction already exists for this click_id — skip, let API cron handle updates.
-    if click_id and transaction_exists(click_id):
+    # 4a. UNIVERSAL identity resolver — byte-identical to PHP
+    #     Cashback_API_Client::resolve_uniq_id (pinned by dedup-vectors.json).
+    #     network["dedup_identity"] is per-network config; None == legacy
+    #     native-id → verbatim passthrough (today's Admitad/Advcake/EPN
+    #     behaviour). Synthetic fallback covers direct partners with no native
+    #     per-action id. No resolvable identity → DLQ (surfaced), NEVER
+    #     silently dropped (this was the universal data-loss bug).
+    resolved_uniq, dedup_reason = resolve_uniq_id(
+        slug,
+        str(mapped.get("uniq_id", "")),
+        {
+            "order_number": mapped.get("order_number", ""),
+            "offer_id": mapped.get("offer_id", ""),
+            "action_type": mapped.get("action_type", ""),
+            "click_id": click_id,
+        },
+        network.get("dedup_identity"),
+    )
+    if dedup_reason == "no_dedup_inputs":
+        update_webhook_processing_status(webhook_id, "error")
+        logger.warning(
+            "No resolvable dedup identity for %s webhook_id=%s — routed to DLQ "
+            "(misconfigured mapping or partner without per-action id)",
+            slug, webhook_id,
+        )
+        _push_validation_failure_to_dlq(raw_message, "no_dedup_inputs")
+        return
+    mapped["uniq_id"] = resolved_uniq
+    uniq_id = resolved_uniq
+
+    # 4b. If a transaction for THIS action (partner, uniq_id) already exists —
+    # skip, let the API cron own status updates. We do NOT skip on click_id
+    # alone: one click → many independent actions (Admitad split-order).
+    # Pass canonical lower(slug) AND the network display name + raw slug:
+    # pre-cutover rows used the display name ('Admitad') which differs from a
+    # slug like 'adm' even under a case-insensitive collation. Mirrors the
+    # cron guard LOWER(partner) IN (LOWER(slug), LOWER(name)) — UNIQ-001.
+    if uniq_id and transaction_exists_for_action(
+        uniq_id, mapped["partner_name"], network.get("name", slug), slug
+    ):
         update_webhook_processing_status(webhook_id, "ok")
         logger.info(
-            "Webhook for existing transaction %s/%s, skipping update (handled by API cron)",
+            "Webhook for existing action %s/%s, skipping update (handled by API cron)",
             mapped["partner_name"], uniq_id,
         )
         return
@@ -357,10 +397,10 @@ def process_message(raw_message: str) -> None:
     else:
         update_webhook_processing_status(webhook_id, "ok")
 
-    # 6. Validate required fields
-    if not uniq_id:
-        logger.warning("No uniq_id in webhook for %s, webhook_id=%s", slug, webhook_id)
-        return
+    # 6. uniq_id is guaranteed non-empty here: the universal resolver (step 4a)
+    #    either returned a native/synthetic id or already routed this message
+    #    to the DLQ and returned. The old `if not uniq_id: return` silent-drop
+    #    is intentionally gone — that was the universal data-loss bug.
 
     # 7. Set resolved numeric user_id (partner_token already resolved above)
     user_id = postback_user_id

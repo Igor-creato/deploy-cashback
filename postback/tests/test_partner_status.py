@@ -144,7 +144,7 @@ class TestProcessMessagePartnerStatusBranch(unittest.TestCase):
 
         with patch("worker.processor.get_network", return_value={"name": "Advcake"}), \
              patch("worker.processor.save_raw_webhook", return_value=10) as mock_save, \
-             patch("worker.processor.transaction_exists") as mock_tx_exists, \
+             patch("worker.processor.transaction_exists_for_action") as mock_tx_exists, \
              patch("worker.processor.insert_transaction") as mock_insert:
             process_message(self._build_message())
 
@@ -162,7 +162,7 @@ class TestProcessMessagePartnerStatusBranch(unittest.TestCase):
 
         with patch("worker.processor.get_network", return_value={"name": "Advcake"}), \
              patch("worker.processor.save_raw_webhook", return_value=11) as mock_save, \
-             patch("worker.processor.transaction_exists") as mock_tx_exists:
+             patch("worker.processor.transaction_exists_for_action") as mock_tx_exists:
             process_message(self._build_message(event_type="Partner_Status"))
 
         mock_save.assert_called_once()
@@ -175,7 +175,7 @@ class TestProcessMessagePartnerStatusBranch(unittest.TestCase):
 
         with patch("worker.processor.get_network", return_value={"name": "Advcake"}), \
              patch("worker.processor.save_raw_webhook", return_value=None), \
-             patch("worker.processor.transaction_exists") as mock_tx_exists, \
+             patch("worker.processor.transaction_exists_for_action") as mock_tx_exists, \
              patch("worker.processor.insert_transaction") as mock_insert:
             process_message(self._build_message())
 
@@ -215,17 +215,20 @@ class TestProcessMessagePartnerStatusBranch(unittest.TestCase):
             },
             "status_mapping": {"1": "waiting", "2": "completed", "3": "declined"},
         }
-        # transaction_exists возвращает True → ранний skip, чтобы не лезть в check_click_id_and_get_user.
-        # Это всё равно докажет что мы прошли по transaction-pipeline (а не на partner_status branch).
+        # transaction_exists_for_action возвращает True → ранний skip, чтобы не
+        # лезть в check_click_id_and_get_user. Это докажет что мы прошли по
+        # transaction-pipeline (а не на partner_status branch). uniq_id
+        # ('test-action-1') непустой → universal resolver = native passthrough
+        # (dedup_identity отсутствует в network_cfg → None → legacy native).
         with patch("worker.processor.get_network", return_value=network_cfg), \
              patch("worker.processor.save_raw_webhook", return_value=42) as mock_save, \
-             patch("worker.processor.transaction_exists", return_value=True) as mock_tx_exists, \
+             patch("worker.processor.transaction_exists_for_action", return_value=True) as mock_tx_exists, \
              patch("worker.processor.update_webhook_processing_status"):
             process_message(msg)
 
         # save_raw_webhook вызван БЕЗ event_type kwarg (default).
         self.assertNotIn("event_type", mock_save.call_args.kwargs)
-        # И transaction_exists вызван — мы прошли по transaction-pipeline.
+        # И transaction_exists_for_action вызван — мы прошли по transaction-pipeline.
         mock_tx_exists.assert_called_once()
 
 

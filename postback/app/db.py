@@ -487,13 +487,15 @@ def insert_transaction(data: dict[str, Any], registered: bool) -> tuple[bool, st
     else:
         table = f"{prefix}cashback_unregistered_transactions"
 
-    # Build idempotency key from uniq_id + partner + click_id
-    idemp_src = (
-        f"{data.get('uniq_id', '')}_"
-        f"{data.get('partner_name', '')}_"
-        f"{data.get('user_id', '')}_"
-        f"{data.get('click_id', '')}"
-    )
+    # Canonical cross-path idempotency key: sha256( lower(slug) | uniq_id ).
+    # partner_name is already canonicalised to lower(slug) by the worker
+    # (processor step 4), and uniq_id is the universal-resolver output —
+    # so the receiver, the plugin cron (insert_missing_transaction) and the
+    # admin manual path all derive the SAME key for the same logical action,
+    # making idx_idempotency_key a real cross-path exactly-once backstop.
+    # user_id / click_id are deliberately EXCLUDED (mutable / attribution —
+    # must not split one action into several idempotency identities).
+    idemp_src = f"{data.get('partner_name', '')}|{data.get('uniq_id', '')}"
     idempotency_key = hashlib.sha256(idemp_src.encode("utf-8")).hexdigest()
 
     # Build columns and values dynamically from data
@@ -653,8 +655,33 @@ def enqueue_notification(
         )
 
 
-def transaction_exists(click_id: str) -> bool:
-    """Check if a transaction with this click_id already exists in either transactions table."""
+def transaction_exists_for_action(uniq_id: str, *partner_values: str) -> bool:
+    """True if a transaction for THIS action already exists in either table.
+
+    Identity is (uniq_id, partner). uniq_id is the per-action system id
+    (Admitad admitad_id/action_id, Advcake id, EPN transactionId, or the
+    universal synthetic id). click_id is intentionally NOT used: one click
+    legitimately maps to many independent actions (split-order).
+
+    partner_values: one or more candidate partner strings. New writes
+    canonicalise partner = lower(slug), but PRE-cutover historical rows were
+    written with the network DISPLAY NAME (e.g. 'Admitad') which is a
+    DIFFERENT string from a slug like 'adm' — a case-insensitive collation
+    cannot equate them. So we mirror the cron reconciliation guard exactly:
+    LOWER(partner) IN (LOWER(slug), LOWER(name)). Without this, a re-postback
+    of a pre-cutover action would miss the legacy row and INSERT a duplicate
+    cashback transaction (UNIQ-001, fintech review 2026-05-15).
+    """
+    aliases = []
+    seen = set()
+    for v in partner_values:
+        v = (v or "").strip()
+        if v and v.lower() not in seen:
+            seen.add(v.lower())
+            aliases.append(v)
+    if not uniq_id or not aliases:
+        return False
+    placeholders = ", ".join(["LOWER(%s)"] * len(aliases))
     prefix = _prefix()
     for tbl_suffix in ("cashback_transactions", "cashback_unregistered_transactions"):
         table = f"{prefix}{tbl_suffix}"
@@ -662,11 +689,15 @@ def transaction_exists(click_id: str) -> bool:
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        f"SELECT 1 FROM `{table}` WHERE `click_id` = %s LIMIT 1",
-                        (click_id,),
+                        f"SELECT 1 FROM `{table}` "
+                        f"WHERE `uniq_id` = %s "
+                        f"AND LOWER(`partner`) IN ({placeholders}) LIMIT 1",
+                        (uniq_id, *aliases),
                     )
                     if cur.fetchone() is not None:
                         return True
         except Exception as e:
-            logger.warning("transaction_exists check failed on %s: %s", table, e)
+            logger.warning(
+                "transaction_exists_for_action check failed on %s: %s", table, e
+            )
     return False
