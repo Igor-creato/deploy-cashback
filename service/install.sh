@@ -293,11 +293,11 @@ touch "$INSTALL_DIR/volumes/traefik/acme.json"
 chmod 600 "$INSTALL_DIR/volumes/traefik/acme.json"
 log "acme.json создан (chmod 600)"
 
-# ─── Подстановка email в traefik.yml ─────────────────────
-if [[ -f "$INSTALL_DIR/volumes/traefik/traefik.yml" ]]; then
-  sed -i "s|__ACME_EMAIL__|${ACME_EMAIL}|g" "$INSTALL_DIR/volumes/traefik/traefik.yml"
-  log "Email подставлен в traefik.yml"
-fi
+# ─── traefik.yml рендерится из .tpl ниже (вместе с nginx/grafana) ───
+# Раньше здесь был `sed -i __ACME_EMAIL__` ПО tracked traefik.yml —
+# из-за этого рабочее дерево на сервере вечно было «грязным» (M).
+# Теперь .tpl + envsubst, как у nginx/grafana; generated traefik.yml
+# в .gitignore. Рендер — после блока установки envsubst (ниже).
 
 # ─── Рендеринг шаблонов Grafana provisioning ─────────────
 # Grafana 12.4 не разворачивает env-vars в contactPoints[].settings.addresses,
@@ -328,6 +328,20 @@ if [[ -f "$NGINX_TPL" ]]; then
   log "default.conf сгенерирован (server_name: ${NGINX_SERVER_NAMES})"
 else
   warn "default.conf.tpl не найден — пропуск рендера nginx-конфига"
+fi
+
+# ─── Рендеринг traefik.yml ───────────────────────────────
+# email Let's Encrypt не hardcode'им в tracked-файл (раньше sed -i по
+# traefik.yml оставлял рабочее дерево грязным на сервере). Тот же .tpl +
+# envsubst паттерн, что у nginx/grafana; generated traefik.yml в .gitignore.
+TRAEFIK_TPL="$INSTALL_DIR/volumes/traefik/traefik.yml.tpl"
+TRAEFIK_OUT="$INSTALL_DIR/volumes/traefik/traefik.yml"
+if [[ -f "$TRAEFIK_TPL" ]]; then
+  ACME_EMAIL="$ACME_EMAIL" envsubst '${ACME_EMAIL}' < "$TRAEFIK_TPL" > "$TRAEFIK_OUT"
+  chmod 644 "$TRAEFIK_OUT"
+  log "traefik.yml сгенерирован (ACME_EMAIL=${ACME_EMAIL})"
+else
+  warn "traefik.yml.tpl не найден — пропуск рендера traefik-конфига"
 fi
 
 # ─── Создание Docker-сетей ────────────────────────────────

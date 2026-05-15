@@ -8,6 +8,7 @@ service/.env
 service/.env.local
 service/secrets/
 service/volumes/nginx/default.conf
+service/volumes/traefik/traefik.yml
 postback/.env
 postback/.env.local
 

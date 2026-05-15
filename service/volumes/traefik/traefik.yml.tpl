@@ -1,6 +1,11 @@
 # ═══════════════════════════════════════════
 # Traefik v3 — Optimized for low traffic (500–1000 req/day)
 # ═══════════════════════════════════════════
+#
+# ШАБЛОН. Не редактируйте сгенерированный traefik.yml вручную — он в
+# .gitignore и перезаписывается install.sh из этого .tpl через
+# `envsubst '${ACME_EMAIL}'`. Реальное значение email берётся из
+# ACME_EMAIL (install.sh запрашивает интерактивно / из окружения).
 
 entryPoints:
   web:
@@ -88,7 +93,7 @@ log:
 certificatesResolvers:
   letsencrypt:
     acme:
-      email: '__ACME_EMAIL__'
+      email: '${ACME_EMAIL}'
       storage: acme.json
       httpChallenge:
         entryPoint: web
