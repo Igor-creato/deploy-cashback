@@ -217,7 +217,13 @@ def sanitize_imported_network(
     """
     if not isinstance(payload, dict):
         return None, "bad_format"
-    if payload.get("_type") != EXPORT_TYPE or payload.get("_version") != EXPORT_VERSION:
+    # Строгий gate: _type — ровно str, _version — ровно int (не bool,
+    # не float). В Python `True == 1` и `1.0 == 1`, поэтому без
+    # проверки типа `_version: true|1.0` обошёл бы «строгий» gate.
+    if not isinstance(payload.get("_type"), str) or payload["_type"] != EXPORT_TYPE:
+        return None, "bad_format"
+    ver = payload.get("_version")
+    if type(ver) is not int or ver != EXPORT_VERSION:
         return None, "bad_format"
     net = payload.get("network")
     if not isinstance(net, dict):
@@ -230,7 +236,14 @@ def sanitize_imported_network(
     if isinstance(net.get("name"), str) and net["name"].strip():
         clean["name"] = net["name"].strip()
 
-    clean["is_active"] = bool(net.get("is_active", existing.get("is_active", False)))
+    # Только настоящий JSON-bool; иначе сохраняем существующее значение
+    # (паритет с network_save: чекбокс == "on"; crafted "false"/0/{} не
+    # должны случайно включить отключённую сеть).
+    clean["is_active"] = (
+        net["is_active"]
+        if isinstance(net.get("is_active"), bool)
+        else existing.get("is_active", False)
+    )
 
     wm = net.get("webhook_method")
     if wm in _WEBHOOK_METHODS:
@@ -246,8 +259,17 @@ def sanitize_imported_network(
     except (ValueError, TypeError):
         clean["rate_limit"] = 200
 
-    clean["mapping"] = _coerce_str_map(net.get("mapping"))
-    clean["status_mapping"] = _coerce_str_map(net.get("status_mapping"))
+    # Паритет с network_save: mapping/status_mapping перезаписываются
+    # только если в файле есть непустой набор; пустой/отсутствующий —
+    # сохраняем существующий (минимальный файл не должен стереть всю
+    # маршрутизацию). field_transforms network_save выставляет всегда
+    # (в т.ч. пустым) — сохраняем это поведение.
+    new_mapping = _coerce_str_map(net.get("mapping"))
+    if new_mapping:
+        clean["mapping"] = new_mapping
+    new_status_map = _coerce_str_map(net.get("status_mapping"))
+    if new_status_map:
+        clean["status_mapping"] = new_status_map
     clean["field_transforms"] = _coerce_str_map(net.get("field_transforms"))
 
     # signing: whitelist подполей; secret — всегда из existing.
@@ -267,8 +289,13 @@ def sanitize_imported_network(
     if not isinstance(hdr, str) or not _SIG_HEADER_RE.match(hdr):
         hdr = "X-Signature"
 
+    sig_enabled = (
+        in_sig["enabled"]
+        if isinstance(in_sig.get("enabled"), bool)
+        else bool(existing_sig.get("enabled", False))
+    )
     clean["signing"] = {
-        "enabled": bool(in_sig.get("enabled", False)),
+        "enabled": sig_enabled,
         "algorithm": algo,
         "secret": existing_sig.get("secret", ""),
         "header": hdr,

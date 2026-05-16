@@ -652,7 +652,10 @@ async def network_import_settings(
     if not (fname.endswith(".json") or ctype in ("application/json", "text/json")):
         return _reject("not_json")
 
-    raw = await file.read()
+    # Bounded read: читаем максимум на 1 байт больше лимита, чтобы
+    # oversized-файл не материализовался в RAM целиком до проверки.
+    # (Полноценный body-size cap — также на уровне Uvicorn/nginx.)
+    raw = await file.read(MAX_IMPORT_BYTES + 1)
     if len(raw) > MAX_IMPORT_BYTES:
         return _reject("too_large")
 

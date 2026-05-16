@@ -155,15 +155,77 @@ class ImportSanitizeTest(unittest.TestCase):
         self.assertEqual(clean["name"], "Renamed")
         self.assertEqual(clean["rate_limit"], 200)  # negative → default
         self.assertEqual(clean["webhook_method"], "GET&POST")  # invalid → kept
-        # Невалидные пары маппинга отброшены, валидные сохранены.
+        # Непустой mapping в файле перезаписывает; мусорные пары отброшены.
         self.assertEqual(clean["mapping"], {"a": "b", "ok": "y"})
-        # signing: невалидные значения → дефолты, enabled bool-коэрция.
+        # signing: невалидные значения → дефолты; enabled="yes" не bool →
+        # сохраняется существующее (sample: True).
         self.assertTrue(clean["signing"]["enabled"])
         self.assertEqual(clean["signing"]["algorithm"], "hmac-sha256")
         self.assertEqual(clean["signing"]["header"], "X-Signature")
         self.assertEqual(clean["signing"]["format"], "hex")
         self.assertEqual(clean["signing"]["source"], "body")
         self.assertNotIn("evil_extra_key", clean)
+
+    def test_version_type_strict(self):
+        """`True == 1` / `1.0 == 1` не должны обходить strict gate."""
+        existing = _sample_network()
+        for bad_ver in (True, 1.0, "1"):
+            clean, err = sanitize_imported_network(
+                {"_type": EXPORT_TYPE, "_version": bad_ver, "network": {}},
+                existing,
+            )
+            self.assertIsNone(clean, f"_version={bad_ver!r} must be rejected")
+            self.assertEqual(err, "bad_format")
+
+    def test_type_field_must_be_str(self):
+        existing = _sample_network()
+        clean, err = sanitize_imported_network(
+            {"_type": 1, "_version": EXPORT_VERSION, "network": {}}, existing
+        )
+        self.assertIsNone(clean)
+        self.assertEqual(err, "bad_format")
+
+    def test_bool_fields_require_real_json_bool(self):
+        """is_active / signing.enabled: crafted "false"/0/{} НЕ включают
+        отключённую сеть/HMAC — сохраняется существующее значение."""
+        existing = _sample_network()
+        existing["is_active"] = False
+        existing["signing"]["enabled"] = False
+        payload = {
+            "_type": EXPORT_TYPE,
+            "_version": EXPORT_VERSION,
+            "network": {
+                "is_active": "false",  # truthy string — НЕ bool
+                "signing": {"enabled": 1},  # int — НЕ bool
+            },
+        }
+        clean, err = sanitize_imported_network(payload, existing)
+        self.assertEqual(err, "")
+        self.assertFalse(clean["is_active"])
+        self.assertFalse(clean["signing"]["enabled"])
+
+        # Настоящий JSON-bool — принимается.
+        payload["network"]["is_active"] = True
+        payload["network"]["signing"]["enabled"] = True
+        clean, _ = sanitize_imported_network(payload, existing)
+        self.assertTrue(clean["is_active"])
+        self.assertTrue(clean["signing"]["enabled"])
+
+    def test_empty_mapping_preserves_existing(self):
+        """Минимальный файл без mapping/status_mapping не стирает
+        существующую маршрутизацию (паритет с network_save)."""
+        existing = _sample_network()
+        payload = {
+            "_type": EXPORT_TYPE,
+            "_version": EXPORT_VERSION,
+            "network": {"name": "X"},  # ни mapping, ни status_mapping
+        }
+        clean, err = sanitize_imported_network(payload, existing)
+        self.assertEqual(err, "")
+        self.assertEqual(clean["mapping"], existing["mapping"])
+        self.assertEqual(clean["status_mapping"], existing["status_mapping"])
+        # field_transforms network_save выставляет всегда → пустой.
+        self.assertEqual(clean["field_transforms"], {})
 
     def test_roundtrip_export_then_import(self):
         existing = _sample_network()
