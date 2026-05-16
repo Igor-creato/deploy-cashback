@@ -51,12 +51,27 @@ Tracking: **Igor-creato/deploy-cashback#1**
    он лежит рядом в том же `OUTDIR` (`fpm.log`, `pre-usr2.txt`,
    `samples.tsv`, `events.log`, `post.txt`).
 
+### Тест H1 — USR2 при ЗАНЯТОМ воркере (главный)
+
+Прогон #1 (idle-USR2) дал чистый reload без лупа → баг state-dependent.
+Гипотеза H1: луп нужен занятый длинным запросом воркер в момент USR2
+(на проде — `as_async_request_queue_runner` во время деплоя). Тест:
+```
+bash service/scripts/diag/capture-fpm-usr2.sh --hold-seconds 150
+```
+Harness сам займёт РОВНО один FPM-воркер безобидным `<?php sleep(150);`
+(скрипт в **/tmp контейнера**, НЕ в webroot — nginx недостижим, исчезает
+при любом recreate; удаляется по выходу), дождётся `active>=1`, затем
+пошлёт один USR2. 150с > graceful-окна и > `request_terminate_timeout=120s`
+— проверяются и graceful-drain, и SIGKILL-на-120s. Подтвердить `yes`,
+вставить `SUMMARY.txt` в чат (там строка «ПРЕДУСЛОВИЕ H1: АКТИВНО»).
+
 Вариант «ловить реальный релиз вместо ручного USR2»:
 ```
 bash service/scripts/diag/capture-fpm-usr2.sh --no-fire   # армируется и ждёт
 ```
 затем запустить штатный деплой плагина в другом окне; скрипт сам поймает
-`reloading` в логе.
+`reloading` в логе. Совместимо с `--hold-seconds`.
 
 Полезные env-переключатели (по умолчанию разумны):
 `CONTAINER`, `SAMPLE_INTERVAL` (0.5s), `MAX_CAPTURE_SECONDS` (300),
