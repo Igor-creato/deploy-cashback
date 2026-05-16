@@ -35,6 +35,7 @@ STATUS_PORT="${STATUS_PORT:-9001}"      # pm.status_listen (выделенный
 SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-0.5}"   # сек между тиками сэмплера (~2 Гц)
 MAX_CAPTURE_SECONDS="${MAX_CAPTURE_SECONDS:-300}"  # потолок всей съёмки
 STABLE_SECONDS="${STABLE_SECONDS:-30}"  # «восстановлено» = тишина в логе N сек
+PRE_TRIGGER_WAIT="${PRE_TRIGGER_WAIT:-1200}"  # --no-fire: ждать внешний триггер N сек (ручной wp-admin)
 FIRE_USR2=1
 # HOLD_SECONDS>0 → тест H1: занять РОВНО один FPM-воркер длинным безобидным
 # запросом (PHP sleep) на N сек, затем USR2. Скрипт sleep живёт в /tmp
@@ -198,7 +199,32 @@ if [ "$FIRE_USR2" -eq 1 ]; then
     exit 0
   fi
 else
-  log "режим --no-fire: жду внешний USR2. T0 определю по 'reloading' в логе."
+  log "режим --no-fire: жду ВНЕШНИЙ триггер (wp-admin ZIP + USR2 вручную)."
+  log ">>> Делай прод-релиз КАК ОБЫЧНО. Скрипт ждёт reload в логе до ${PRE_TRIGGER_WAIT}s."
+  # КРИТИЧНО: без этой фазы recovery-таймер стартовал бы сразу и объявил
+  # «восстановлено» за STABLE_SECONDS ДО того, как оператор сделает USR2
+  # (ручной wp-admin занимает минуты). Ждём ПЕРВУЮ lifecycle-активность.
+  base_lc="$(grep -cE 'child [0-9]+ (started|exited)|reloading|ready to handle connections' \
+             "$OUTDIR/fpm.log" 2>/dev/null)"; : "${base_lc:=0}"
+  pt_deadline=$(( $(date +%s) + PRE_TRIGGER_WAIT ))
+  triggered=0
+  while [ "$(date +%s)" -lt "$pt_deadline" ]; do
+    cur_lc="$(grep -cE 'child [0-9]+ (started|exited)|reloading|ready to handle connections' \
+              "$OUTDIR/fpm.log" 2>/dev/null)"; : "${cur_lc:=0}"
+    if [ "$cur_lc" -gt "$base_lc" ]; then
+      T0="$(nowns)"; T0H="$(date -u +%H:%M:%S.%3N)"
+      triggered=1
+      log "ТРИГГЕР пойман в $T0H (lifecycle-активность в логе) — снимаю инцидент"
+      break
+    fi
+    sleep 2
+  done
+  if [ "$triggered" -eq 0 ]; then
+    log "WARN: за ${PRE_TRIGGER_WAIT}s триггера не было — стопаю (улики нет)"
+    cleanup; trap - EXIT INT TERM
+    echo "$T0 $T0H" > "$OUTDIR/t0.txt"
+    exit 0
+  fi
 fi
 echo "$T0 $T0H" > "$OUTDIR/t0.txt"
 
