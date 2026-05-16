@@ -19,7 +19,7 @@ import time
 from typing import Any
 
 import redis
-from fastapi import FastAPI, Form, Request, Response, Cookie, HTTPException
+from fastapi import FastAPI, File, Form, Request, Response, UploadFile, Cookie, HTTPException
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -30,6 +30,9 @@ from app.config import (
     generate_secret_path,
     get_db_config,
     get_all_networks,
+    network_export_view,
+    sanitize_imported_network,
+    MAX_IMPORT_BYTES,
     DEFAULT_MAPPING,
     DEFAULT_STATUS_MAP,
     DEFAULT_SIGNING,
@@ -590,6 +593,81 @@ async def network_delete(slug: str, request: Request, whk_session: str | None = 
     cfg["networks"].pop(slug, None)
     save(cfg)
     return RedirectResponse("/networks", status_code=302)
+
+
+# --- Network settings export / import ---
+
+
+@app.get("/networks/{slug}/export")
+async def network_export(slug: str, request: Request, whk_session: str | None = Cookie(None)):
+    """Скачать настройки конкретной сети JSON-файлом (без секретов)."""
+    _require_auth(whk_session, request)
+    cfg = load()
+    network = cfg["networks"].get(slug)
+    if not network:
+        return RedirectResponse("/networks", status_code=302)
+
+    body = json.dumps(
+        network_export_view(slug, network), indent=2, ensure_ascii=False
+    )
+    import re
+    safe_slug = re.sub(r"[^a-z0-9_-]", "", slug.lower()) or "network"
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="network-{safe_slug}-settings.json"'
+            ),
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@app.post("/networks/{slug}/import")
+async def network_import_settings(
+    slug: str,
+    request: Request,
+    whk_session: str | None = Cookie(None),
+    file: UploadFile = File(...),
+):
+    """Загрузить настройки сети из JSON-файла. Применяется сразу.
+
+    Серверная валидация (client `accept` не доверяем): расширение/
+    content-type, размер ≤ MAX_IMPORT_BYTES, корректный JSON, строгий
+    gate _type/_version + whitelist полей. Секреты сохраняются текущими.
+    """
+    _require_auth(whk_session, request)
+    cfg = load()
+    if slug not in cfg["networks"]:
+        return RedirectResponse("/networks", status_code=302)
+
+    def _reject(reason: str):
+        return RedirectResponse(
+            f"/networks/{slug}?import_error={reason}", status_code=302
+        )
+
+    fname = (file.filename or "").lower()
+    ctype = (file.content_type or "").lower()
+    if not (fname.endswith(".json") or ctype in ("application/json", "text/json")):
+        return _reject("not_json")
+
+    raw = await file.read()
+    if len(raw) > MAX_IMPORT_BYTES:
+        return _reject("too_large")
+
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return _reject("parse_error")
+
+    clean, err = sanitize_imported_network(payload, cfg["networks"][slug])
+    if clean is None:
+        return _reject(err or "bad_format")
+
+    cfg["networks"][slug] = clean
+    save(cfg)
+    return RedirectResponse(f"/networks/{slug}", status_code=302)
 
 
 # --- Logs ---

@@ -209,6 +209,32 @@
 
 </form>
 
+<!-- Import / Export -->
+<div class="card">
+    <div class="card-title">📦 Импорт / экспорт настроек</div>
+    {% set import_error = request.query_params.get('import_error') %}
+    {% if import_error %}
+    <p class="text-muted mb-1" style="color: var(--red);">
+        Импорт отклонён: {{ {
+            'bad_format': 'неверный формат файла',
+            'too_large': 'файл больше 1 МБ',
+            'not_json': 'нужен файл .json',
+            'parse_error': 'битый JSON'
+        }.get(import_error, 'ошибка') }}
+    </p>
+    {% endif %}
+    <p class="text-muted mb-1">Секреты (HMAC-секрет, секретный путь URL) в файл не выгружаются и при загрузке сохраняются текущими.</p>
+    <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+        <a href="/networks/{{ slug }}/export" class="btn btn-secondary btn-sm">⬇️ Скачать настройки</a>
+        <form method="POST" action="/networks/{{ slug }}/import" enctype="multipart/form-data"
+              style="display: flex; gap: 8px; align-items: center;"
+              onsubmit="return confirm('Текущие настройки сети будут перезаписаны загруженными. Продолжить?')">
+            <input type="file" name="file" accept="application/json,.json" required style="max-width: 320px;">
+            <button type="submit" class="btn btn-primary btn-sm">⬆️ Загрузить настройки</button>
+        </form>
+    </div>
+</div>
+
 <!-- Delete -->
 <div class="card mt-2" style="border-color: rgba(239,68,68,.3);">
     <div class="card-title" style="color: var(--red);">⚠️ Опасная зона</div>

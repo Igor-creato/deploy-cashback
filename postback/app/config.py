@@ -3,8 +3,10 @@ Configuration manager.
 Stores DB credentials, network configs, and field mappings in a JSON file.
 Thread-safe reads/writes with file locking.
 """
+import copy
 import json
 import os
+import re
 import secrets
 import threading
 from pathlib import Path
@@ -147,3 +149,138 @@ DEFAULT_SIGNING: dict[str, Any] = {
     "format": "hex",
     "source": "body",
 }
+
+
+# ============================================================
+# Экспорт / импорт настроек одной сети (админка → JSON-файл).
+#
+# Решения:
+#  - Секреты НЕ выгружаются: secret_path (секретный путь webhook-URL)
+#    и signing.secret (HMAC-секрет). При импорте берутся из текущей
+#    конфигурации (паттерн как пароль БД в db_settings_save).
+#  - Строгий gate по _type/_version + whitelist полей с тип-коэрцией
+#    (зеркало network_save в admin/panel.py).
+# ============================================================
+
+EXPORT_TYPE = "webhook-receiver-network"
+EXPORT_VERSION = 1
+MAX_IMPORT_BYTES = 1 * 1024 * 1024  # 1 МиБ — cap на загружаемый файл
+
+_SIG_ALGOS = ("hmac-sha256", "hmac-sha1")
+_SIG_FORMATS = ("hex", "base64", "sha256-prefix-hex")
+_SIG_SOURCES = ("body", "query-raw", "path-and-body")
+_WEBHOOK_METHODS = ("GET", "POST", "GET&POST")
+_SIG_HEADER_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
+
+
+def network_export_view(slug: str, network: dict[str, Any]) -> dict[str, Any]:
+    """Безопасное представление сети для выгрузки в файл.
+
+    Глубокая копия (исходный cfg не мутируется); удалён secret_path,
+    из signing вырезан secret. Обёрнуто в конверт с _type/_version
+    для строгой валидации при обратном импорте.
+    """
+    net = copy.deepcopy(network)
+    net.pop("secret_path", None)
+    sig = net.get("signing")
+    if isinstance(sig, dict):
+        sig.pop("secret", None)
+    return {
+        "_type": EXPORT_TYPE,
+        "_version": EXPORT_VERSION,
+        "slug": slug,
+        "network": net,
+    }
+
+
+def _coerce_str_map(value: Any) -> dict[str, str]:
+    """dict с str→str парами; всё нестроковое/невалидное отбрасывается."""
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, str] = {}
+    for k, v in value.items():
+        if isinstance(k, str) and isinstance(v, str) and k.strip() and v.strip():
+            out[k.strip()] = v.strip()
+    return out
+
+
+def sanitize_imported_network(
+    payload: Any, existing: dict[str, Any]
+) -> tuple[dict[str, Any] | None, str]:
+    """Валидирует загруженный JSON и возвращает чистую конфигурацию сети.
+
+    Returns (clean_network, "") при успехе либо (None, reason) при
+    отклонении. Секреты (secret_path, signing.secret, db_network_id)
+    всегда берутся из `existing`, а не из файла. Неизвестные ключи
+    отбрасываются. Сеть определяется URL-slug'ом — slug из файла
+    игнорируется.
+    """
+    if not isinstance(payload, dict):
+        return None, "bad_format"
+    if payload.get("_type") != EXPORT_TYPE or payload.get("_version") != EXPORT_VERSION:
+        return None, "bad_format"
+    net = payload.get("network")
+    if not isinstance(net, dict):
+        return None, "bad_format"
+
+    # Базой служит существующая конфигурация — так гарантированно
+    # сохраняются секреты и не теряются служебные поля (slug и т.п.).
+    clean = copy.deepcopy(existing)
+
+    if isinstance(net.get("name"), str) and net["name"].strip():
+        clean["name"] = net["name"].strip()
+
+    clean["is_active"] = bool(net.get("is_active", existing.get("is_active", False)))
+
+    wm = net.get("webhook_method")
+    if wm in _WEBHOOK_METHODS:
+        clean["webhook_method"] = wm
+    # иначе — сохраняется существующий (или отсутствует)
+
+    if isinstance(net.get("webhook_base_url"), str):
+        clean["webhook_base_url"] = net["webhook_base_url"].strip()
+
+    try:
+        rl = int(net.get("rate_limit", existing.get("rate_limit", 200)))
+        clean["rate_limit"] = rl if rl >= 0 else 200
+    except (ValueError, TypeError):
+        clean["rate_limit"] = 200
+
+    clean["mapping"] = _coerce_str_map(net.get("mapping"))
+    clean["status_mapping"] = _coerce_str_map(net.get("status_mapping"))
+    clean["field_transforms"] = _coerce_str_map(net.get("field_transforms"))
+
+    # signing: whitelist подполей; secret — всегда из existing.
+    existing_sig = existing.get("signing") or dict(DEFAULT_SIGNING)
+    in_sig = net.get("signing") if isinstance(net.get("signing"), dict) else {}
+
+    algo = in_sig.get("algorithm")
+    if algo not in _SIG_ALGOS:
+        algo = "hmac-sha256"
+    fmt = in_sig.get("format")
+    if fmt not in _SIG_FORMATS:
+        fmt = "hex"
+    src = in_sig.get("source")
+    if src not in _SIG_SOURCES:
+        src = "body"
+    hdr = in_sig.get("header")
+    if not isinstance(hdr, str) or not _SIG_HEADER_RE.match(hdr):
+        hdr = "X-Signature"
+
+    clean["signing"] = {
+        "enabled": bool(in_sig.get("enabled", False)),
+        "algorithm": algo,
+        "secret": existing_sig.get("secret", ""),
+        "header": hdr,
+        "format": fmt,
+        "source": src,
+    }
+
+    # Секреты/служебные поля — строго из existing (защита от подмены
+    # через файл).
+    if "secret_path" in existing:
+        clean["secret_path"] = existing["secret_path"]
+    if "db_network_id" in existing:
+        clean["db_network_id"] = existing["db_network_id"]
+
+    return clean, ""
