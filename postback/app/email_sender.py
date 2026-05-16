@@ -209,7 +209,7 @@ def _is_notification_enabled(user_id: int, notification_type: str) -> bool:
 #          notifications/class-cashback-email-sender.php (get_logo_url)
 # =====================================================================
 
-_BRAND_FALLBACK_COLOR = "#2271b1"
+_BRAND_FALLBACK_COLOR = "#4555e8"
 _HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 _BRANDING_CACHE_TTL = 300  # 5 minutes
 _branding_cache: dict[str, Any] = {}
@@ -283,10 +283,17 @@ def _get_theme_mods(stylesheet: str) -> dict[str, Any]:
 def _get_brand_color() -> str:
     """
     Brand color resolution chain (mirrors Cashback_Theme_Color::get_brand_color):
-      1) wp_options.xts-woodmart-options['primary-color']
-      2) theme_mods_<stylesheet>['primary-color']
-      3) fallback #2271b1
+      1) wp_options.cashback_email_brand_color (admin manual override)
+      2) wp_options.xts-woodmart-options['primary-color']
+      3) theme_mods_<stylesheet>['primary-color']
+      4) fallback #4555e8
     """
+    # Admin manual override (mirrors PHP step 1) — без него постбэк-письма
+    # игнорировали брендовый цвет, заданный в админке.
+    override = _normalize_hex(_get_wp_option("cashback_email_brand_color"))
+    if override:
+        return override
+
     # Woodmart options
     woodmart = _php_unserialize(_get_wp_option("xts-woodmart-options"))
     if isinstance(woodmart, dict) and "primary-color" in woodmart:
@@ -403,11 +410,24 @@ def _get_woodmart_logo_url() -> str | None:
 def _get_logo_url() -> str | None:
     """
     Logo URL resolution chain (mirrors Cashback_Email_Sender::get_logo_url):
-      1) Woodmart Header Builder image
-      2) theme_mods.custom_logo (attachment ID → guid)
-      3) theme_mods.site_icon (attachment ID → guid)
-      4) None — header is rendered without <img>
+      1) wp_options.cashback_email_logo_id (admin manual override)
+      2) Woodmart Header Builder image
+      3) theme_mods.custom_logo (attachment ID → guid)
+      4) theme_mods.site_icon (attachment ID → guid)
+      5) None — header is rendered without <img>
     """
+    # Admin manual override (mirrors PHP step 1). Без этого шага постбэк-письма
+    # шли без логотипа, если он задан только через cashback_email_logo_id.
+    override_id = _get_wp_option("cashback_email_logo_id")
+    try:
+        override_int = int(override_id) if override_id else 0
+    except (ValueError, TypeError):
+        override_int = 0
+    if override_int > 0:
+        url = _attachment_guid(override_int)
+        if url:
+            return url
+
     woodmart_logo = _get_woodmart_logo_url()
     if woodmart_logo:
         return woodmart_logo
