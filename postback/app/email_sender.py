@@ -413,7 +413,7 @@ def _get_logo_url() -> str | None:
       1) wp_options.cashback_email_logo_id (admin manual override)
       2) Woodmart Header Builder image
       3) theme_mods.custom_logo (attachment ID → guid)
-      4) theme_mods.site_icon (attachment ID → guid)
+      4) wp_options.site_icon (attachment ID → guid) — get_site_icon_url()
       5) None — header is rendered without <img>
     """
     # Admin manual override (mirrors PHP step 1). Без этого шага постбэк-письма
@@ -444,9 +444,11 @@ def _get_logo_url() -> str | None:
         if url:
             return url
 
-    site_icon = mods.get("site_icon")
+    # Site icon хранится в wp_options.site_icon (НЕ в theme_mods) — так его
+    # читает WP get_site_icon_url(), к которому делегирует PHP get_logo_url().
+    site_icon = _get_wp_option("site_icon")
     try:
-        site_icon_id = int(site_icon) if site_icon is not None else 0
+        site_icon_id = int(site_icon) if site_icon else 0
     except (ValueError, TypeError):
         site_icon_id = 0
     if site_icon_id > 0:

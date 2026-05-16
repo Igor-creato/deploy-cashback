@@ -121,6 +121,24 @@ class TestLogoIdOverride(_BrandingTestBase):
                              "https://example.test/override.png")
             whb.assert_not_called()
 
+    def test_site_icon_option_resolves_when_no_logo_id(self):
+        # Логотип задан только через WP Site Icon (wp_options.site_icon),
+        # custom_logo/Header Builder пусты — как на staging (site_icon=4044).
+        opts = {
+            "cashback_email_logo_id": None,
+            "whb_main_header": None,
+            "stylesheet": "woodmart-child",
+            "theme_mods_woodmart-child": None,
+            "site_icon": "4044",
+        }
+        with mock.patch.object(email_sender, "_get_wp_option",
+                               side_effect=_option_stub(opts)), \
+             mock.patch.object(email_sender, "_attachment_guid",
+                               return_value="https://example.test/icon.svg") as guid:
+            self.assertEqual(email_sender._get_logo_url(),
+                             "https://example.test/icon.svg")
+            guid.assert_called_once_with(4044)
+
     def test_empty_logo_id_falls_through(self):
         opts = {
             "cashback_email_logo_id": "0",
