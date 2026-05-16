@@ -156,16 +156,20 @@ echo "$T0 $T0H" > "$OUTDIR/t0.txt"
 log "съёмка идёт; жду стабилизации (нет start/exit/reload ${STABLE_SECONDS}s)…"
 deadline=$(( $(date +%s) + MAX_CAPTURE_SECONDS ))
 last_evt=$(date +%s)
+prev_lc=-1
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  recent="$(tail -n 400 "$OUTDIR/fpm.log" 2>/dev/null \
-            | grep -cE 'child [0-9]+ (started|exited)|reloading|ready to handle' || true)"
+  # «Тишина» = счётчик lifecycle-строк во ВСЁМ fpm.log перестал расти на
+  # STABLE_SECONDS (старый вариант сравнивал tail-400 и при коротком логе
+  # никогда не «затихал» → жёг весь MAX_CAPTURE_SECONDS).
+  lc="$(grep -cE 'child [0-9]+ (started|exited)|reloading: execvp|ready to handle connections' \
+        "$OUTDIR/fpm.log" 2>/dev/null)"; : "${lc:=0}"
   cur=$(date +%s)
-  if [ "${recent:-0}" -gt 0 ]; then
-    # были lifecycle-строки в хвосте — оценим свежесть по последней метке
+  if [ "$lc" -ne "$prev_lc" ]; then
+    prev_lc=$lc
     last_evt=$cur
   fi
   if [ $(( cur - last_evt )) -ge "$STABLE_SECONDS" ]; then
-    log "лог тих ${STABLE_SECONDS}s → считаем восстановленным"
+    log "lifecycle-строки не растут ${STABLE_SECONDS}s → восстановлено"
     break
   fi
   sleep 2
@@ -185,9 +189,11 @@ log "стримы остановлены"
 # ── Анализ → SUMMARY.txt (компактно; ЭТО вставлять в чат) ──────────────────
 SUM="$OUTDIR/SUMMARY.txt"
 L="$OUTDIR/fpm.log"
-exited_code="$(grep -cE 'exited with code'  "$L" 2>/dev/null || echo 0)"
-exited_sig="$(grep -cE  'exited on signal'   "$L" 2>/dev/null || echo 0)"
-started_n="$(grep -cE   'child [0-9]+ started' "$L" 2>/dev/null || echo 0)"
+# grep -c печатает 0 и при отсутствии совпадений (только код возврата=1),
+# поэтому НЕ добавляем `|| echo 0` (давал дубль "0\n0"); страхуем ${:-0}.
+exited_code="$(grep -cE 'exited with code'   "$L" 2>/dev/null)"; : "${exited_code:=0}"
+exited_sig="$(grep -cE  'exited on signal'    "$L" 2>/dev/null)"; : "${exited_sig:=0}"
+started_n="$(grep -cE   'child [0-9]+ started' "$L" 2>/dev/null)"; : "${started_n:=0}"
 reload_ln="$(grep -nE   'reloading: execvp|reloading: master|Reloading' "$L" 2>/dev/null | head -3)"
 ready_ln="$(grep -nE    'ready to handle connections' "$L" 2>/dev/null | tail -3)"
 warn_ln="$(grep -nE     '\[WARNING\]|\[ERROR\]' "$L" 2>/dev/null | grep -vE 'child [0-9]+ exited (with code 0|on signal)' | head -20)"
@@ -201,9 +207,10 @@ life_hist="$(grep -oE 'after [0-9.]+ seconds from start' "$L" 2>/dev/null \
 rate_top="$(grep -E 'child [0-9]+ started' "$L" 2>/dev/null \
   | awk '{print substr($1,1,19)}' | sort | uniq -c | sort -rn | head -5)"
 
-# Жизнь самого старого pre-USR2 воркера (кандидат «застрявший», Q1/Q3)
-oldest="$(awk '/php-fpm: pool|php-fpm$/ {print}' "$OUTDIR/pre-usr2.txt" 2>/dev/null \
-  | sort -k4 -n 2>/dev/null | tail -1)"
+# Жизнь самого старого pre-USR2 pool-воркера (кандидат «застрявший», Q1/Q3).
+# TOPFMT: pid ppid lstart(5 ток.) etimes stat wchan rss cmd → etimes = поле 8.
+oldest="$(grep -E 'php-fpm: pool' "$OUTDIR/pre-usr2.txt" 2>/dev/null \
+  | sort -k8 -n 2>/dev/null | tail -1)"
 
 {
   echo "════════ SUMMARY — prod PHP-FPM USR2 spawn-loop ════════"
