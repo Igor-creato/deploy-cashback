@@ -95,5 +95,91 @@ class TestRenderHtmlLinkified(unittest.TestCase):
         self.assertNotIn(f": {_HISTORY_URL}</p>", html)
 
 
+class TestInjectionViaAttackerFields(unittest.TestCase):
+    """
+    Codex TEST-001: attacker-influenceable поля (offer_name из CPA-сети,
+    display_name) проходят через шаблон письма только HTML-escaped, без
+    выхода из <a>/href-контекста.
+    """
+
+    def setUp(self):
+        email_sender._branding_cache = {}
+        email_sender._branding_cache_ts = 0.0
+
+    def _render(self, display_name: str, shop: str) -> str:
+        body = (
+            f"Здравствуйте, {display_name}!\n\n"
+            "Ваша покупка зафиксирована.\n\n"
+            f"Магазин: {shop}\n"
+            "Сумма заказа: 264,30 ₽\n"
+            "Статус: В ожидании\n\n"
+            f"Отслеживайте статус в личном кабинете: {_HISTORY_URL}"
+        )
+        branding = {
+            "brand_color": _BRAND,
+            "text_color": "#ffffff",
+            "logo_url": None,
+            "signature": "",
+        }
+        with mock.patch.object(email_sender, "_get_branding", return_value=branding):
+            return email_sender._render_html("Новая покупка", body, "Савелло Клуб", 42)
+
+    def test_html_tags_in_display_name_are_escaped(self):
+        html = self._render('<script>alert(1)</script>', "aptekiplus.ru")
+        self.assertNotIn("<script>alert(1)</script>", html)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
+
+    def test_quotes_in_offer_name_cannot_break_attribute(self):
+        # Кавычки/угловые скобки в имени магазина не должны открыть атрибут или тег.
+        html = self._render("egorius", '"><img src=x onerror=alert(1)>')
+        self.assertNotIn('"><img src=x onerror=alert(1)>', html)
+        self.assertIn("&quot;&gt;&lt;img src=x onerror=alert(1)&gt;", html)
+        self.assertNotIn("<img src=x", html)
+
+    def test_url_lookalike_in_offer_name_is_linkified_but_inert(self):
+        # offer_name с javascript:-схемой НЕ должен стать ссылкой (regex только http/s),
+        # а http-подобный текст — заэскейпленным якорем, не XSS-вектором.
+        html = self._render("egorius", "javascript:alert(1)")
+        self.assertNotIn('href="javascript:', html)
+        self.assertNotIn("<a href=\"javascript", html)
+
+    def test_legit_history_anchor_still_present_with_hostile_fields(self):
+        html = self._render('<b>x</b>', '"onmouseover="x')
+        self.assertEqual(html.count(f'<a href="{_HISTORY_URL}"'), 1)
+
+
+class TestLinkifyBoundaryCases(unittest.TestCase):
+    """Codex TEST-002: пустое тело, unicode-границы, query-параметры, склейка."""
+
+    def test_empty_string(self):
+        self.assertEqual(email_sender._make_clickable("", _BRAND), "")
+
+    def test_url_with_query_params_escaped_in_href(self):
+        url = "https://savelloclub.ru/t?a=1&b=2"
+        out = email_sender._make_clickable(f"x {url} y", _BRAND)
+        # & в href обязан быть &amp; (как у PHP esc_url/esc_attr), не сырой.
+        self.assertIn("a=1&amp;b=2", out)
+        self.assertNotIn("a=1&b=2", out)
+        self.assertIn('text-decoration:underline;">', out)
+
+    def test_unicode_and_emoji_around_url_preserved_and_escaped(self):
+        out = email_sender._make_clickable(f"Кабинет 🎁 {_HISTORY_URL} ✓", _BRAND)
+        self.assertIn("Кабинет 🎁 <a href=", out)
+        self.assertTrue(out.endswith(" ✓"), out)
+        self.assertEqual(out.count(f'href="{_HISTORY_URL}"'), 1)
+
+    def test_url_immediately_followed_by_non_space_is_consumed_until_delimiter(self):
+        # [^\s<>"'] — буква сразу после слэша входит в URL (как и в WP до разделителя).
+        out = email_sender._make_clickable("see https://savelloclub.ru/aбв", _BRAND)
+        self.assertIn('href="https://savelloclub.ru/a', out)
+        self.assertNotIn("<a href=\"\"", out)
+
+    def test_no_url_body_has_no_anchor_and_is_escaped(self):
+        out = email_sender._make_clickable("Сумма: 33,80 ₽ <b>x</b> & co", _BRAND)
+        self.assertNotIn("<a ", out)
+        self.assertIn("&lt;b&gt;x&lt;/b&gt;", out)
+        self.assertIn("&amp; co", out)
+
+
 if __name__ == "__main__":
     unittest.main()
