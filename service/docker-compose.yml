@@ -62,7 +62,7 @@ services:
   #    не наполняется — нет I/O. Healthchecks/error.log идут в stdout.
   # ═══════════════════════════════════════════
   traefik:
-    image: traefik:v3.6.14@sha256:4cda3393930dceff030e144b46260e96e1337c9cfaa4fed81c90cb8f4d498f57
+    image: traefik:v3.7.1@sha256:6b9cbca6fac42ab0075f5437d8dc1685cfd188626d8d515839ea94f8b6271c42
     container_name: traefik
     restart: always
     mem_limit: 256m
@@ -101,7 +101,7 @@ services:
   #    binlog write на каждый INSERT/UPDATE — крупная экономия I/O.
   # ═══════════════════════════════════════════
   mariadb:
-    image: mariadb:11.8@sha256:78a5047d3ba33975f183f183c2464cc7f1eab13ec8667e57cc9a5821d6da7577
+    image: mariadb:11.8.6@sha256:78a5047d3ba33975f183f183c2464cc7f1eab13ec8667e57cc9a5821d6da7577
     container_name: mariadb
     restart: always
     mem_limit: 1536m
@@ -138,7 +138,7 @@ services:
   # ── Без изменений по командам (AOF + everysec корректно для финданных).
   # ═══════════════════════════════════════════
   redis:
-    image: redis:8.6.2-alpine@sha256:c5e375abb885e6b2021c0377879e4890bf76f9065b8922ffc113f2b226b9fc17
+    image: redis:8.6.3-alpine@sha256:d146f83b1e0f02fc27c26a50cee39338c736674c5959db84363e6ae3cd9e02d2
     container_name: redis
     restart: always
     mem_limit: 320m
@@ -364,7 +364,7 @@ services:
   #    - Volume nginx-logs больше НЕ нужен (удалён из volumes).
   # ═══════════════════════════════════════════
   nginx:
-    image: nginx:1.28.2-alpine@sha256:5b4900b042ccfa8b0a73df622c3a60f2322faeb2be800cbee5aa7b44d241649e
+    image: nginx:1.30.1-alpine@sha256:6525b050aa05151ca19ec7090851bc8c12006cffdae5187f3d28023402f44cfa
     container_name: nginx
     restart: always
     mem_limit: 256m
@@ -433,7 +433,7 @@ services:
   #    Остальные метрики уже отключены оригинальным конфигом.
   # ═══════════════════════════════════════════
   cadvisor:
-    image: gcr.io/cadvisor/cadvisor:v0.55.1@sha256:3de2bd5203120b866d74a9b283b2ffb8ec382fbf9dc321814700c6ea6f44ec57
+    image: ghcr.io/google/cadvisor:v0.57.0@sha256:e75bdb03b74b0b6995f208f166fead2e6e555dde73e44200113bb26f41b1981d
     container_name: cadvisor
     restart: unless-stopped
     mem_limit: 512m
@@ -525,7 +525,7 @@ services:
   #    Дополнительно: --search.maxLookback ограничивает RAM.
   # ═══════════════════════════════════════════
   victoriametrics:
-    image: victoriametrics/victoria-metrics:v1.140.0@sha256:5ea06e3a567249f8a23181208755f36dabd3b515f7023e9eb570fd4ae6c29203
+    image: victoriametrics/victoria-metrics:v1.142.0@sha256:67cdc4722232cbcbe15dc09850d983df8857eea9b7194b85e979275315ac2ce2
     container_name: victoriametrics
     restart: unless-stopped
     mem_limit: 768m
@@ -567,7 +567,7 @@ services:
   # ── Убран victoriametrics-logs-datasource (VictoriaLogs больше нет).
   # ═══════════════════════════════════════════
   grafana:
-    image: grafana/grafana:12.4.1@sha256:e932bd6ed0e026595b08483cd0141e5103e1ab7ff8604839ff899b8dc54cabcb
+    image: grafana/grafana:12.4.3-security-02@sha256:fe5bc62ae401120c48b4cd50db122a632bfca8d48a7115a32cc7c9b80c19dc48
     container_name: grafana
     restart: unless-stopped
     # PID 1 в grafana/grafana — это `grafana server` (Go-бинарь), который не
