@@ -534,7 +534,10 @@ def _render_html(subject: str, body_text: str, site_name: str, user_id: int | No
 
     # Body
     parts.append('<tr><td style="padding:32px;color:#333333;font-size:15px;line-height:1.6;">')
-    parts.append(f'<p style="white-space:pre-line;margin:0 0 16px;">{_esc(body_text)}</p>')
+    parts.append(
+        '<p style="white-space:pre-line;margin:0 0 16px;">'
+        f"{_make_clickable(body_text, brand_color)}</p>"
+    )
 
     if signature:
         parts.append(
@@ -568,6 +571,45 @@ def _esc(s: str) -> str:
 def _nl2br(s: str) -> str:
     """Mirror PHP nl2br: insert <br /> before each newline (text already escaped)."""
     return s.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br />\n")
+
+
+_URL_RE = re.compile(r'https?://[^\s<>"\']+', re.IGNORECASE)
+# Хвостовая пунктуация, которую WP make_clickable() не включает в URL.
+_URL_TRAIL = ".,;:!?"
+
+
+def _make_clickable(text: str, brand_color: str) -> str:
+    """
+    Mirror PHP make_clickable(wp_kses_post($msg)) + brand-color recolor
+    (class-cashback-email-sender.php:224-231): голый http(s)-URL в теле письма
+    превращается в styled <a>. До этого Python-воркер слал URL плоским
+    НЕкликабельным текстом, в отличие от писем, отправленных через wp_mail().
+
+    Возвращает уже безопасный HTML — повторно НЕ экранировать.
+    """
+    out: list[str] = []
+    pos = 0
+    for m in _URL_RE.finditer(text):
+        out.append(_esc(text[pos:m.start()]))
+        url = m.group(0)
+        trail = ""
+        while url and url[-1] in _URL_TRAIL:
+            trail = url[-1] + trail
+            url = url[:-1]
+        # Несбалансированная закрывающая скобка → в хвост (как WP make_clickable).
+        if url.endswith(")") and url.count("(") < url.count(")"):
+            trail = url[-1] + trail
+            url = url[:-1]
+        safe = _esc(url)
+        out.append(
+            f'<a href="{safe}" '
+            f'style="color:{_esc(brand_color)};text-decoration:underline;">'
+            f"{safe}</a>"
+        )
+        out.append(_esc(trail))
+        pos = m.end()
+    out.append(_esc(text[pos:]))
+    return "".join(out)
 
 
 # =====================================================================
