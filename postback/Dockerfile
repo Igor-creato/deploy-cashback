@@ -6,14 +6,19 @@ WORKDIR /srv
 
 RUN apt-get update && apt-get install -y --no-install-recommends wget && rm -rf /var/lib/apt/lists/*
 
+# starlette ЯВНО запинен: FastAPI 0.136.1 требует `starlette>=0.46.0` без
+# верхней границы → без пина пересборка тянет Starlette 1.0.0, где УДАЛЁН
+# `@app.on_event` (используется в app/receiver.py:84). 0.52.1 — последний
+# pre-1.0 stable, `on_event` ещё есть. НЕ снимать пин до миграции на lifespan.
 RUN pip install --no-cache-dir \
     fastapi==0.136.1 \
-    uvicorn[standard]==0.46.0 \
+    starlette==0.52.1 \
+    uvicorn[standard]==0.47.0 \
     redis==7.4.0 \
-    pymysql==1.1.2 \
+    pymysql==1.1.3 \
     cryptography==47.0.0 \
     jinja2==3.1.6 \
-    python-multipart==0.0.26 \
+    python-multipart==0.0.29 \
     httptools==0.7.1 \
     prometheus_client==0.25.0 \
     phpserialize==1.3
