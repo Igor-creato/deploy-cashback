@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import time
+from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import parse_qsl
 
@@ -60,13 +61,6 @@ def _client_ip(request: Request) -> str:
         return fwd.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
 
-app = FastAPI(
-    title="Webhook Receiver",
-    docs_url=None,
-    redoc_url=None,
-    openapi_url=None,
-)
-
 _redis_pool: aioredis.Redis | None = None
 
 
@@ -81,11 +75,27 @@ async def get_redis() -> aioredis.Redis:
     return _redis_pool
 
 
-@app.on_event("shutdown")
-async def shutdown():
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # startup: ничего — Redis-пул создаётся лениво в get_redis().
+    yield
+    # shutdown: закрываем пул. aclose() — преемник close() в asyncio-клиенте
+    # redis-py (close() помечен deprecated). Заменяет снятый в Starlette 1.0
+    # @app.on_event("shutdown") — паритетная семантика (выполняется при
+    # остановке приложения).
     global _redis_pool
-    if _redis_pool:
-        await _redis_pool.close()
+    if _redis_pool is not None:
+        await _redis_pool.aclose()
+        _redis_pool = None
+
+
+app = FastAPI(
+    title="Webhook Receiver",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+    lifespan=_lifespan,
+)
 
 
 def _not_found() -> PlainTextResponse:
